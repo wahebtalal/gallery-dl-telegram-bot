@@ -64,16 +64,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         str(job_dir),
         "--write-metadata",
         "--no-mtime",
-        url,
     ]
+    if API_ID:
+        cmd += ["-o", f"extractor.telegram.api-id={API_ID}"]
+    if API_HASH:
+        cmd += ["-o", f"extractor.telegram.api-hash={API_HASH}"]
+    if STRING_SESSION:
+        cmd += ["-o", f"extractor.telegram.session={STRING_SESSION}"]
+    cmd += [url]
 
     env = os.environ.copy()
-    if API_ID:
-        env["ID"] = API_ID
-    if API_HASH:
-        env["HASH"] = API_HASH
-    if STRING_SESSION:
-        env["STRING"] = STRING_SESSION
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -82,7 +82,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await update.message.reply_text("⌛ العملية أخذت وقت طويل وتم إيقافها. جرّب رابط آخر.")
+            shutil.rmtree(job_dir, ignore_errors=True)
+            return
 
         if proc.returncode != 0:
             msg = (stderr.decode("utf-8", "ignore") or stdout.decode("utf-8", "ignore"))[-1200:]
