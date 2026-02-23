@@ -1,7 +1,9 @@
 import asyncio
 import os
+import re
 import shutil
 import subprocess
+import urllib.request
 import uuid
 from pathlib import Path
 
@@ -22,6 +24,32 @@ DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 def is_url(text: str) -> bool:
     t = text.strip().lower()
     return t.startswith("http://") or t.startswith("https://")
+
+
+def extract_media_links(raw_html: str):
+    html = raw_html.replace('\\/', '/')
+    pattern = r'https?://[^\s"\'<>]+\.(?:mp4|webm|m3u8|jpg|jpeg|png|gif|webp)(?:\?[^\s"\'<>]*)?'
+    found = re.findall(pattern, html, flags=re.IGNORECASE)
+    # remove duplicates while preserving order
+    out = []
+    seen = set()
+    for u in found:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+def scrape_media_links(url: str):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        },
+    )
+    with urllib.request.urlopen(req, timeout=25) as r:
+        data = r.read().decode("utf-8", "ignore")
+    return extract_media_links(data)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -92,6 +120,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if proc.returncode != 0:
             msg = (stderr.decode("utf-8", "ignore") or stdout.decode("utf-8", "ignore"))[-1200:]
+
+            # fallback for unsupported websites: scrape direct media URLs from page source
+            if "Unsupported URL" in msg:
+                try:
+                    links = scrape_media_links(url)
+                    if links:
+                        sent_links = 0
+                        for link in links[:8]:
+                            try:
+                                await update.message.reply_document(link)
+                                sent_links += 1
+                            except Exception:
+                                await update.message.reply_text(link)
+                        await update.message.reply_text(f"✅ تم عبر الوضع البديل. ارسلت {sent_links} ملف/رابط.")
+                        shutil.rmtree(job_dir, ignore_errors=True)
+                        return
+                except Exception as fe:
+                    msg = msg + f"\n(fallback failed: {fe})"
+
             await update.message.reply_text(f"❌ فشل التحميل:\n{msg}")
             shutil.rmtree(job_dir, ignore_errors=True)
             return
