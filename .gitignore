@@ -4,3 +4,4 @@ bot.pid
 downloads/
 __pycache__/
 *.pyc
+.venv/
