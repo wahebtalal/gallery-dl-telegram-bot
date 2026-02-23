@@ -1,0 +1,6 @@
+.env
+bot.log
+bot.pid
+downloads/
+__pycache__/
+*.pyc
