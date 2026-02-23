@@ -65,13 +65,23 @@ bot.on('message', async (msg) => {
     if (STRING_SESSION) args.push('-o', `extractor.telegram.session=${STRING_SESSION}`);
     args.push(url);
 
-    const proc = spawn('gallery-dl', args, { env: process.env });
-    let err = '';
-    proc.stderr.on('data', (d) => (err += d.toString()));
+    async function runDownloader(bin, extraArgs = []) {
+      return await new Promise((resolve) => {
+        const proc = spawn(bin, [...extraArgs, ...args], { env: process.env });
+        let err = '';
+        proc.stderr.on('data', (d) => (err += d.toString()));
+        proc.on('error', (e) => resolve({ code: 127, err: String(e?.message || e) }));
+        proc.on('close', (code) => resolve({ code, err }));
+      });
+    }
 
-    const code = await new Promise((resolve) => proc.on('close', resolve));
-    if (code !== 0) {
-      await bot.sendMessage(msg.chat.id, `❌ فشل التحميل\n${err.slice(-1200) || 'gallery-dl error'}`);
+    let result = await runDownloader('gallery-dl');
+    if (result.code === 127) {
+      result = await runDownloader('python3', ['-m', 'gallery_dl']);
+    }
+
+    if (result.code !== 0) {
+      await bot.sendMessage(msg.chat.id, `❌ فشل التحميل\n${(result.err || 'gallery-dl error').slice(-1200)}`);
       fs.rmSync(jobDir, { recursive: true, force: true });
       return;
     }
