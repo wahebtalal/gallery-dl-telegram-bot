@@ -1,4 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
+const express = require('express');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -99,5 +100,11 @@ bot.on('message', async (msg) => {
     await bot.sendMessage(msg.chat.id, `❌ خطأ: ${e.message}`);
   }
 });
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+app.get('/health', (_, res) => res.json({ ok: true }));
+app.get('/', (_, res) => res.send('gallery-dl bot is running'));
+app.listen(PORT, () => console.log(`Health server on :${PORT}`));
 
 console.log('Bot polling started');
