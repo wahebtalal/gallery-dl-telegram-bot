@@ -11,6 +11,7 @@ const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || '/app/downloads';
 const API_ID = process.env.API_ID || '';
 const API_HASH = process.env.API_HASH || '';
 const STRING_SESSION = process.env.STRING_SESSION || '';
+const ADMIN_CHAT_ID = Number(process.env.ADMIN_CHAT_ID || ALLOWED_USER_ID || 0);
 
 if (!BOT_TOKEN) throw new Error('BOT_TOKEN is required');
 fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
@@ -184,3 +185,8 @@ app.get('/', (_, res) => res.send('gallery-dl bot is running'));
 app.listen(PORT, () => console.log(`Health server on :${PORT}`));
 
 console.log('Bot polling started');
+
+if (ADMIN_CHAT_ID) {
+  const startText = `✅ البوت اشتغل${process.env.DOKPLOY_APP_NAME ? ` (${process.env.DOKPLOY_APP_NAME})` : ''}`;
+  bot.sendMessage(ADMIN_CHAT_ID, startText).catch(() => {});
+}
