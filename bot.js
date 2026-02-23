@@ -90,23 +90,40 @@ bot.on('message', async (msg) => {
     if (STRING_SESSION) args.push('-o', `extractor.telegram.session=${STRING_SESSION}`);
     args.push(url);
 
-    async function runDownloader(bin, extraArgs = []) {
+    async function runCommand(bin, commandArgs = []) {
       return await new Promise((resolve) => {
-        const proc = spawn(bin, [...extraArgs, ...args], { env: process.env });
+        const proc = spawn(bin, commandArgs, { env: process.env });
         let err = '';
         proc.stderr.on('data', (d) => (err += d.toString()));
-        proc.on('error', (e) => resolve({ code: 127, err: String(e?.message || e) }));
-        proc.on('close', (code) => resolve({ code, err }));
+        proc.on('error', (e) => resolve({ code: 127, err: String(e?.message || e), tool: bin }));
+        proc.on('close', (code) => resolve({ code, err, tool: bin }));
       });
     }
 
-    let result = await runDownloader('gallery-dl');
+    // 1) gallery-dl primary
+    let result = await runCommand('gallery-dl', args);
+
+    // 2) gallery-dl python fallback
     if (result.code === 127) {
-      result = await runDownloader('python3', ['-m', 'gallery_dl']);
+      result = await runCommand('python3', ['-m', 'gallery_dl', ...args]);
+    }
+
+    // 3) yt-dlp fallback for unsupported links
+    if (result.code !== 0) {
+      const ytdlpOut = path.join(jobDir, '%(title).80s [%(id)s].%(ext)s');
+      const ytdlpArgs = ['--no-playlist', '-o', ytdlpOut, url];
+      const ytdlpResult = await runCommand('yt-dlp', ytdlpArgs);
+      if (ytdlpResult.code === 127) {
+        // python module fallback
+        const ytdlpPy = await runCommand('python3', ['-m', 'yt_dlp', ...ytdlpArgs]);
+        if (ytdlpPy.code === 0) result = { code: 0, err: '', tool: 'yt-dlp' };
+      } else if (ytdlpResult.code === 0) {
+        result = { code: 0, err: '', tool: 'yt-dlp' };
+      }
     }
 
     if (result.code !== 0) {
-      const errText = (result.err || 'gallery-dl error').slice(-1200);
+      const errText = (result.err || 'download error').slice(-1200);
 
       if (/Unsupported URL/i.test(errText)) {
         try {
