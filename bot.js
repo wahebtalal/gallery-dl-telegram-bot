@@ -36,6 +36,31 @@ function walk(dir, out = []) {
   return out;
 }
 
+function extractMediaLinks(html) {
+  const normalized = String(html || '').replace(/\\\//g, '/');
+  const re = /https?:\/\/[^\s"'<>]+\.(?:mp4|webm|m3u8|jpg|jpeg|png|gif|webp)(?:\?[^\s"'<>]*)?/gi;
+  const found = normalized.match(re) || [];
+  const out = [];
+  const seen = new Set();
+  for (const u of found) {
+    if (!seen.has(u)) {
+      seen.add(u);
+      out.push(u);
+    }
+  }
+  return out;
+}
+
+async function scrapeMediaLinks(url) {
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    },
+  });
+  const html = await res.text();
+  return extractMediaLinks(html);
+}
+
 bot.onText(/^\/start$/, (msg) => {
   if (!isAllowed(msg)) return bot.sendMessage(msg.chat.id, 'غير مصرح لك.');
   bot.sendMessage(msg.chat.id, 'اهلا 👋\nارسل رابط وسأحمّله تلقائيًا عبر gallery-dl.');
@@ -81,7 +106,31 @@ bot.on('message', async (msg) => {
     }
 
     if (result.code !== 0) {
-      await bot.sendMessage(msg.chat.id, `❌ فشل التحميل\n${(result.err || 'gallery-dl error').slice(-1200)}`);
+      const errText = (result.err || 'gallery-dl error').slice(-1200);
+
+      if (/Unsupported URL/i.test(errText)) {
+        try {
+          const links = await scrapeMediaLinks(url);
+          if (links.length) {
+            let sent = 0;
+            for (const link of links.slice(0, 8)) {
+              try {
+                await bot.sendDocument(msg.chat.id, link);
+              } catch {
+                await bot.sendMessage(msg.chat.id, link);
+              }
+              sent++;
+            }
+            await bot.sendMessage(msg.chat.id, `✅ تم عبر الوضع البديل. ارسلت ${sent} ملف/رابط.`);
+            fs.rmSync(jobDir, { recursive: true, force: true });
+            return;
+          }
+        } catch (e) {
+          // continue to default error below
+        }
+      }
+
+      await bot.sendMessage(msg.chat.id, `❌ فشل التحميل\n${errText}`);
       fs.rmSync(jobDir, { recursive: true, force: true });
       return;
     }
