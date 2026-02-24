@@ -124,6 +124,41 @@ async function transcodeToTelegramMp4(inputPath) {
   });
 }
 
+async function getVideoDurationSeconds(filePath) {
+  return await new Promise((resolve) => {
+    const p = spawn('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      filePath,
+    ]);
+    let out = '';
+    p.stdout.on('data', (d) => (out += d.toString()));
+    p.on('error', () => resolve(undefined));
+    p.on('close', (code) => {
+      if (code !== 0) return resolve(undefined);
+      const n = Math.round(parseFloat(out.trim()));
+      resolve(Number.isFinite(n) && n > 0 ? n : undefined);
+    });
+  });
+}
+
+async function createVideoThumbnail(inputPath) {
+  const outputPath = inputPath.replace(/\.[^/.]+$/, '') + '.thumb.jpg';
+  return await new Promise((resolve) => {
+    const p = spawn('ffmpeg', [
+      '-y',
+      '-ss', '00:00:01',
+      '-i', inputPath,
+      '-frames:v', '1',
+      '-vf', 'scale=480:-1',
+      outputPath,
+    ]);
+    p.on('error', () => resolve(null));
+    p.on('close', (code) => resolve(code === 0 && fs.existsSync(outputPath) ? outputPath : null));
+  });
+}
+
 async function scrapeMediaLinks(url) {
   const res = await fetch(url, {
     headers: {
@@ -269,22 +304,33 @@ bot.on('message', async (msg) => {
       } else {
         const looksVideo = videoExts.includes(ext) || await isVideoByProbe(f);
         if (looksVideo) {
-          try {
-            await bot.sendVideo(msg.chat.id, f, { caption, parse_mode: 'HTML', supports_streaming: true });
-          } catch {
-            // Convert to Telegram-friendly mp4 then retry as media
+          const sendAsVideo = async (videoPath) => {
+            const duration = await getVideoDurationSeconds(videoPath);
+            const thumbPath = await createVideoThumbnail(videoPath);
+            const opts = { caption, parse_mode: 'HTML', supports_streaming: true };
+            if (duration) opts.duration = duration;
+            if (thumbPath) opts.thumb = thumbPath;
+            try {
+              await bot.sendVideo(msg.chat.id, videoPath, opts);
+              return true;
+            } catch {
+              return false;
+            } finally {
+              if (thumbPath) { try { fs.unlinkSync(thumbPath); } catch {} }
+            }
+          };
+
+          let ok = await sendAsVideo(f);
+          if (!ok) {
             const converted = await transcodeToTelegramMp4(f);
             if (converted && fs.existsSync(converted)) {
-              try {
-                await bot.sendVideo(msg.chat.id, converted, { caption, parse_mode: 'HTML', supports_streaming: true });
-              } catch {
-                await bot.sendMessage(msg.chat.id, `⏭️ تعذر إرساله كوسائط بعد التحويل: ${path.basename(f)}`);
-              } finally {
-                try { fs.unlinkSync(converted); } catch {}
-              }
-            } else {
-              await bot.sendMessage(msg.chat.id, `⏭️ تخطيته لأنه ليس فيديو قابل للإرسال كوسائط: ${path.basename(f)}`);
+              ok = await sendAsVideo(converted);
+              try { fs.unlinkSync(converted); } catch {}
             }
+          }
+
+          if (!ok) {
+            await bot.sendMessage(msg.chat.id, `⏭️ تعذر إرساله كوسائط حتى بعد التحويل: ${path.basename(f)}`);
           }
         } else {
           await bot.sendMessage(msg.chat.id, `⏭️ تخطيته لأنه ليس صورة/فيديو: ${path.basename(f)}`);
