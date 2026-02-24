@@ -18,6 +18,7 @@ fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const JOBS = new Map();
+const ITEM_ACTIONS = new Map();
 
 function log(...args) {
   console.log(new Date().toISOString(), '-', ...args);
@@ -96,6 +97,24 @@ function actionRows(jobId, gIdx, pIdx = null) {
     ],
     pIdx === null ? [{ text: '🧹 Cleanup group files', callback_data: `clg:${jobId}:${gIdx}` }] : [],
   ].filter(r => r.length);
+}
+
+function perVideoActionRows(token) {
+  return [
+    [
+      { text: '📤 Original', callback_data: `va:${token}:oq` },
+      { text: '🎬 HD', callback_data: `va:${token}:hd` },
+      { text: '📱 SD', callback_data: `va:${token}:sd` },
+    ],
+    [
+      { text: '🗜 Compress', callback_data: `va:${token}:c` },
+      { text: '✨ Lossless', callback_data: `va:${token}:lq` },
+    ],
+    [
+      { text: '🖼 Screenshots', callback_data: `va:${token}:h` },
+      { text: '✂️ Trim 30s', callback_data: `va:${token}:t` },
+    ],
+  ];
 }
 
 function extractMediaLinks(html) {
@@ -423,18 +442,40 @@ async function telethonSendVideo(chatId, videoPath, caption, duration, thumbPath
   });
 }
 
-async function sendMediaFile(chatId, filePath, caption, mode = 's') {
+function detectSourceUrlForFile(filePath, fallbackUrl) {
+  try {
+    const sidecar = `${filePath}.json`;
+    if (fs.existsSync(sidecar)) {
+      const j = JSON.parse(fs.readFileSync(sidecar, 'utf8'));
+      return j.url || j.media_url || j.content_url || j.original || j.webpage_url || fallbackUrl;
+    }
+  } catch {}
+  return fallbackUrl;
+}
+
+async function redownloadToTemp(mediaUrl) {
+  const u = new URL(mediaUrl);
+  const ext = path.extname(u.pathname || '').toLowerCase() || '.mp4';
+  const out = path.join(os.tmpdir(), `redo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
+  const res = await fetch(mediaUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+  if (!res.ok) throw new Error(`download failed: ${res.status}`);
+  const ab = await res.arrayBuffer();
+  fs.writeFileSync(out, Buffer.from(ab));
+  return out;
+}
+
+async function sendMediaFile(chatId, filePath, caption, mode = 's', inlineKeyboard = null) {
   const ext = path.extname(filePath).toLowerCase();
   const imageExts = ['.jpg', '.jpeg', '.png', '.webp'];
   const videoExts = ['.mp4', '.m4v', '.mov', '.mkv', '.webm', '.avi', '.mpeg', '.mpg', '.m4s', '.ts'];
 
   if (imageExts.includes(ext)) {
     await bot.sendPhoto(chatId, filePath, { caption, parse_mode: 'HTML' });
-    return true;
+    return { ok: true, kind: 'photo' };
   }
 
   const looksVideo = videoExts.includes(ext) || await isVideoByProbe(filePath);
-  if (!looksVideo) return false;
+  if (!looksVideo) return { ok: false, kind: 'other' };
 
   if (mode === 'h') {
     for (const t of [1, 3, 5]) {
@@ -449,7 +490,7 @@ async function sendMediaFile(chatId, filePath, caption, mode = 's') {
         try { fs.unlinkSync(thumb); } catch {}
       }
     }
-    return true;
+    return { ok: true, kind: 'video' };
   }
 
   let source = filePath;
@@ -479,11 +520,21 @@ async function sendMediaFile(chatId, filePath, caption, mode = 's') {
   const meta = await getVideoMeta(source);
   const thumb = await createVideoThumbnail(source);
   try {
-    await bot.sendVideo(chatId, source, { caption, parse_mode: 'HTML', supports_streaming: true, duration: meta.duration, width: meta.width, height: meta.height, thumb });
-    return true;
+    const sent = await bot.sendVideo(chatId, source, {
+      caption,
+      parse_mode: 'HTML',
+      supports_streaming: true,
+      duration: meta.duration,
+      width: meta.width,
+      height: meta.height,
+      thumb,
+      reply_markup: inlineKeyboard ? { inline_keyboard: inlineKeyboard } : undefined,
+    });
+    return { ok: true, kind: 'video', messageId: sent?.message_id };
   } catch (e) {
     log('send:video:error', e?.message || String(e));
-    return await telethonSendVideo(chatId, source, caption, meta.duration, thumb);
+    const ok = await telethonSendVideo(chatId, source, caption, meta.duration, thumb);
+    return { ok, kind: 'video' };
   } finally {
     if (thumb) { try { fs.unlinkSync(thumb); } catch {} }
     if (source !== filePath) { try { fs.unlinkSync(source); } catch {} }
@@ -681,10 +732,7 @@ bot.on('callback_query', async (q) => {
       log('job:start', { chat: chatId, from: q.from?.id, url: pending.url, mode });
       log('job:dir', jobDir);
 
-      const urlList = await extractUrlsCount(pending.url);
-      if (urlList.count) {
-        await bot.sendMessage(chatId, `🔗 Extracted URLs: ${urlList.count}`);
-      }
+      await extractUrlsCount(pending.url);
 
       const { result, files } = await downloadToJob(pending.url, jobDir);
       if (result.code !== 0) {
@@ -712,11 +760,19 @@ bot.on('callback_query', async (q) => {
       } else {
         const meta = findMetadata(jobDir);
         let sent = 0;
-        for (const f of files.slice(0, 80)) {
+        for (const f of files.slice(0, 200)) {
           const cap = buildCaption({ title: meta.title, href: meta.href, fallbackUrl: pending.url, fileName: path.basename(f) });
-          const ok = await sendMediaFile(chatId, f, cap, mode);
-          if (ok) sent++;
+          const sourceMediaUrl = detectSourceUrlForFile(f, pending.url);
+          let keyboard = null;
+          if ((await isVideoByProbe(f)) || /\.(mp4|m4v|mov|mkv|webm|avi|mpeg|mpg|m4s|ts)$/i.test(path.extname(f))) {
+            const token = Math.random().toString(36).slice(2, 10);
+            ITEM_ACTIONS.set(token, { mediaUrl: sourceMediaUrl, fallbackUrl: pending.url, createdAt: Date.now() });
+            keyboard = perVideoActionRows(token);
+          }
+          const res = await sendMediaFile(chatId, f, cap, mode, keyboard);
+          if (res.ok) sent++;
           try { fs.unlinkSync(f); } catch {}
+          try { fs.unlinkSync(`${f}.json`); } catch {}
         }
         await bot.sendMessage(chatId, `✅ done. sent=${sent}`);
         try { fs.rmSync(jobDir, { recursive: true, force: true }); } catch {}
@@ -765,6 +821,36 @@ bot.on('callback_query', async (q) => {
       return bot.answerCallbackQuery(q.id);
     }
 
+    if (type === 'va') {
+      const [, token, mode] = parts;
+      const item = ITEM_ACTIONS.get(token);
+      if (!item) return bot.answerCallbackQuery(q.id, { text: 'media expired' });
+      await bot.answerCallbackQuery(q.id, { text: 'processing selected video...' });
+
+      const tmpDir = path.join(os.tmpdir(), `redo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+      fs.mkdirSync(tmpDir, { recursive: true });
+      try {
+        let localFile;
+        if (/\.(mp4|m4v|mov|mkv|webm|avi|mpeg|mpg|m4s|ts)(\?|$)/i.test(item.mediaUrl)) {
+          localFile = await redownloadToTemp(item.mediaUrl);
+        } else {
+          const { result, files } = await downloadToJob(item.fallbackUrl || item.mediaUrl, tmpDir);
+          if (result.code !== 0 || !files.length) throw new Error('download failed for selected media');
+          localFile = files.find((f) => /\.(mp4|m4v|mov|mkv|webm|avi|mpeg|mpg|m4s|ts)$/i.test(path.extname(f))) || files[0];
+        }
+        const cap = buildCaption({ title: 'Processed', href: item.mediaUrl, fallbackUrl: item.fallbackUrl, fileName: path.basename(localFile) });
+        const res = await sendMediaFile(chatId, localFile, cap, mode, perVideoActionRows(token));
+        if (!res.ok) await bot.sendMessage(chatId, '❌ فشل تنفيذ العملية على الفيديو المحدد.');
+        try { fs.unlinkSync(localFile); } catch {}
+      } catch (e) {
+        log('va:error', e?.message || String(e));
+        await bot.sendMessage(chatId, `❌ تعذر تنفيذ العملية: ${e.message || e}`);
+      } finally {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      }
+      return;
+    }
+
     if (type === 'ag' || type === 'ap') {
       const jobId = parts[1];
       const gIdx = Number(parts[2]);
@@ -789,8 +875,8 @@ bot.on('callback_query', async (q) => {
           fallbackUrl: job.url,
           fileName: path.basename(f),
         });
-        const ok = await sendMediaFile(chatId, f, cap, mode);
-        if (ok) sent++;
+        const res = await sendMediaFile(chatId, f, cap, mode);
+        if (res.ok) sent++;
       }
 
       await bot.sendMessage(chatId, `✅ done. sent=${sent}`);
