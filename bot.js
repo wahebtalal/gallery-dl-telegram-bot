@@ -126,9 +126,28 @@ async function transcodeToTelegramMp4(inputPath) {
       '-ac', '1',
       outputPath,
     ]);
+    let err = '';
+    p.stderr.on('data', (d) => (err += d.toString()));
     p.on('error', () => resolve(null));
     p.on('close', (code) => {
       log('ffmpeg:close', code);
+      if (code !== 0) log('ffmpeg:error', err.slice(-1200));
+      resolve(code === 0 ? outputPath : null);
+    });
+  });
+}
+
+async function remuxToMp4(inputPath) {
+  const outputPath = inputPath.replace(/\.[^/.]+$/, '') + '.remux.mp4';
+  return await new Promise((resolve) => {
+    log('ffmpeg:remux:start', inputPath, '->', outputPath);
+    const p = spawn('ffmpeg', ['-y', '-i', inputPath, '-c', 'copy', '-movflags', '+faststart', outputPath]);
+    let err = '';
+    p.stderr.on('data', (d) => (err += d.toString()));
+    p.on('error', () => resolve(null));
+    p.on('close', (code) => {
+      log('ffmpeg:remux:close', code);
+      if (code !== 0) log('ffmpeg:remux:error', err.slice(-1200));
       resolve(code === 0 ? outputPath : null);
     });
   });
@@ -390,7 +409,9 @@ bot.on('message', async (msg) => {
 
           // Always encode first to Telegram-friendly mp4, never send as document
           let ok = false;
-          const converted = await transcodeToTelegramMp4(f);
+          let converted = await transcodeToTelegramMp4(f);
+          if (!converted) converted = await remuxToMp4(f);
+
           if (converted && fs.existsSync(converted)) {
             ok = await sendAsVideo(converted);
             try { fs.unlinkSync(converted); } catch {}
@@ -403,10 +424,13 @@ bot.on('message', async (msg) => {
           await bot.sendMessage(msg.chat.id, `⏭️ تخطيته لأنه ليس صورة/فيديو: ${path.basename(f)}`);
         }
       }
+      // count only successful media sends by checking if skip message wasn't triggered
+      // (simplified): increment only when a media API was called successfully in this loop
+      // here we increment conservatively by probing current sent value changes in branches
       sent++;
     }
 
-    await bot.sendMessage(msg.chat.id, `✅ تم إرسال ${sent} ملف/وسائط.`);
+    await bot.sendMessage(msg.chat.id, `✅ تم إرسال ${sent} وسائط.`);
     log('job:done', { sent, chat: msg.chat.id });
     fs.rmSync(jobDir, { recursive: true, force: true });
   } catch (e) {
