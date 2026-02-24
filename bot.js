@@ -108,13 +108,15 @@ async function transcodeToTelegramMp4(inputPath) {
     const p = spawn('ffmpeg', [
       '-y',
       '-i', inputPath,
+      '-vf', 'scale=trunc(iw*min(960/iw\,960/ih)/2)*2:trunc(ih*min(960/iw\,960/ih)/2)*2,fps=30',
       '-c:v', 'libx264',
       '-preset', 'veryfast',
-      '-crf', '24',
+      '-crf', '30',
       '-pix_fmt', 'yuv420p',
       '-movflags', '+faststart',
       '-c:a', 'aac',
-      '-b:a', '128k',
+      '-b:a', '96k',
+      '-ac', '1',
       outputPath,
     ]);
     p.on('error', () => resolve(null));
