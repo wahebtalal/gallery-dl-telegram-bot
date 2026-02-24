@@ -238,7 +238,7 @@ bot.on('message', async (msg) => {
       '-D', jobDir,
       '--write-metadata',
       '--no-mtime',
-      '-X', 'fapopello',
+      '-X', '/app/extractors',
       '-o', 'extractor.module-sources=/app/extractors',
     ];
     if (API_ID) args.push('-o', `extractor.telegram.api-id=${API_ID}`);
