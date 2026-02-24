@@ -500,11 +500,7 @@ async function sendMediaFile(chatId, filePath, caption, mode = 's', inlineKeyboa
   }
 
   let source = filePath;
-  if (mode === 'oq') {
-    // original quality, only remux if needed
-    const remux = await remuxToMp4(filePath);
-    if (remux) source = remux;
-  } else if (mode === 'hd' || mode === 'sd' || mode === 'lq') {
+  if (mode === 'hd' || mode === 'sd' || mode === 'lq') {
     const prof = await transcodeProfile(filePath, mode);
     if (prof) source = prof;
   } else if (mode === 'c') {
@@ -518,9 +514,6 @@ async function sendMediaFile(chatId, filePath, caption, mode = 's', inlineKeyboa
       p.on('error', () => resolve(null));
     });
     if (trimmed) source = trimmed;
-  } else {
-    const conv = await transcodeToTelegramMp4(filePath) || await remuxToMp4(filePath);
-    if (conv) source = conv;
   }
 
   const meta = await getVideoMeta(source);
