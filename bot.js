@@ -17,6 +17,7 @@ if (!BOT_TOKEN) throw new Error('BOT_TOKEN is required');
 fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+const JOBS = new Map();
 
 function log(...args) {
   console.log(new Date().toISOString(), '-', ...args);
@@ -51,6 +52,44 @@ function groupFilesByTopFolder(baseDir, files) {
     groups.get(key).push(f);
   }
   return groups;
+}
+
+function detectPostId(filePath) {
+  const name = path.basename(filePath);
+  const m = name.match(/_(\d+)_\d+\.[^.]+$/);
+  return m ? m[1] : 'single';
+}
+
+function buildIndex(jobId, jobDir, files) {
+  const groupsMap = groupFilesByTopFolder(jobDir, files);
+  const groups = [];
+  for (const [groupName, groupFiles] of groupsMap.entries()) {
+    const postsMap = new Map();
+    for (const f of groupFiles) {
+      const pid = detectPostId(f);
+      if (!postsMap.has(pid)) postsMap.set(pid, []);
+      postsMap.get(pid).push(f);
+    }
+    const posts = [...postsMap.entries()].map(([postId, items]) => ({ postId, items }));
+    groups.push({ groupName, files: groupFiles, posts });
+  }
+  const model = { jobId, jobDir, groups, createdAt: Date.now() };
+  JOBS.set(jobId, model);
+  return model;
+}
+
+function actionRows(jobId, gIdx, pIdx = null) {
+  const target = pIdx === null ? `ag:${jobId}:${gIdx}:` : `ap:${jobId}:${gIdx}:${pIdx}:`;
+  return [
+    [
+      { text: '📤 Send', callback_data: `${target}s` },
+      { text: '🗜 Compress', callback_data: `${target}c` },
+    ],
+    [
+      { text: '🖼 Screenshots', callback_data: `${target}h` },
+      { text: '✂️ Trim 30s', callback_data: `${target}t` },
+    ],
+  ];
 }
 
 function extractMediaLinks(html) {
@@ -245,6 +284,87 @@ async function scrapeMediaLinks(url) {
   return extractMediaLinks(html);
 }
 
+async function telethonSendVideo(chatId, videoPath, caption, duration, thumbPath) {
+  return await new Promise((resolve) => {
+    const pyBin = fs.existsSync('/opt/py/bin/python') ? '/opt/py/bin/python' : 'python3';
+    const proc = spawn(pyBin, [
+      '/app/telethon_send.py',
+      String(chatId),
+      videoPath,
+      caption,
+      String(duration || ''),
+      String(thumbPath || ''),
+    ], { env: process.env });
+    let perr = '';
+    proc.stderr.on('data', (d) => (perr += d.toString()));
+    proc.on('error', (e) => { log('telethon:spawn:error', e?.message || String(e)); resolve(false); });
+    proc.on('close', (code) => {
+      if (code !== 0) log('telethon:error', perr.slice(-1000));
+      resolve(code === 0);
+    });
+  });
+}
+
+async function sendMediaFile(chatId, filePath, caption, mode = 's') {
+  const ext = path.extname(filePath).toLowerCase();
+  const imageExts = ['.jpg', '.jpeg', '.png', '.webp'];
+  const videoExts = ['.mp4', '.m4v', '.mov', '.mkv', '.webm', '.avi', '.mpeg', '.mpg', '.m4s', '.ts'];
+
+  if (imageExts.includes(ext)) {
+    await bot.sendPhoto(chatId, filePath, { caption, parse_mode: 'HTML' });
+    return true;
+  }
+
+  const looksVideo = videoExts.includes(ext) || await isVideoByProbe(filePath);
+  if (!looksVideo) return false;
+
+  if (mode === 'h') {
+    for (const t of [1, 3, 5]) {
+      const thumb = await new Promise((resolve) => {
+        const out = filePath + `.shot${t}.jpg`;
+        const p = spawn('ffmpeg', ['-y', '-ss', `00:00:0${t}`, '-i', filePath, '-frames:v', '1', '-vf', 'scale=720:-1', out]);
+        p.on('close', (c) => resolve(c === 0 && fs.existsSync(out) ? out : null));
+        p.on('error', () => resolve(null));
+      });
+      if (thumb) {
+        await bot.sendPhoto(chatId, thumb, { caption, parse_mode: 'HTML' });
+        try { fs.unlinkSync(thumb); } catch {}
+      }
+    }
+    return true;
+  }
+
+  let source = filePath;
+  if (mode === 'c') {
+    const c = await compressToUnderLimit(filePath, 48);
+    if (c) source = c;
+  } else if (mode === 't') {
+    const out = filePath + '.trim.mp4';
+    const trimmed = await new Promise((resolve) => {
+      const p = spawn('ffmpeg', ['-y', '-ss', '0', '-t', '30', '-i', filePath, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28', '-c:a', 'aac', '-movflags', '+faststart', out]);
+      p.on('close', (code) => resolve(code === 0 && fs.existsSync(out) ? out : null));
+      p.on('error', () => resolve(null));
+    });
+    if (trimmed) source = trimmed;
+  } else {
+    const conv = await transcodeToTelegramMp4(filePath) || await remuxToMp4(filePath);
+    if (conv) source = conv;
+  }
+
+  const meta = await getVideoMeta(source);
+  const thumb = await createVideoThumbnail(source);
+  try {
+    await bot.sendVideo(chatId, source, { caption, parse_mode: 'HTML', supports_streaming: true, duration: meta.duration, width: meta.width, height: meta.height, thumb });
+    return true;
+  } catch (e) {
+    log('send:video:error', e?.message || String(e));
+    return await telethonSendVideo(chatId, source, caption, meta.duration, thumb);
+  } finally {
+    if (thumb) { try { fs.unlinkSync(thumb); } catch {} }
+    if (source !== filePath) { try { fs.unlinkSync(source); } catch {} }
+  }
+}
+
 bot.onText(/^\/start$/, (msg) => {
   if (!isAllowed(msg)) return bot.sendMessage(msg.chat.id, 'غير مصرح لك.');
   bot.sendMessage(msg.chat.id, 'اهلا 👋\nارسل رابط وسأحمّله تلقائيًا عبر gallery-dl.');
@@ -391,123 +511,105 @@ bot.on('message', async (msg) => {
       return;
     }
 
+    const idxJobId = Math.random().toString(36).slice(2, 8);
+    const index = buildIndex(idxJobId, jobDir, files);
     const meta = findMetadata(jobDir);
+    index.meta = meta;
+    index.url = url;
 
-    let sent = 0;
-    const groups = groupFilesByTopFolder(jobDir, files);
-
-    for (const [groupName, groupFiles] of groups.entries()) {
-      await bot.sendMessage(msg.chat.id, `📦 batch: ${groupName} (${groupFiles.length})`);
-      for (const f of groupFiles.slice(0, 30)) {
-        const size = fs.statSync(f).size / (1024 * 1024);
-        const ext = path.extname(f).toLowerCase();
-
-        if (size > 49 && ['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
-          await bot.sendMessage(msg.chat.id, `⚠️ تخطيت صورة كبيرة: ${path.basename(f)} (${size.toFixed(1)}MB)`);
-          continue;
-        }
-        const caption = buildCaption({
-          title: meta.title,
-          href: meta.href,
-          fallbackUrl: url,
-          fileName: path.basename(f),
-        });
-
-        const imageExts = ['.jpg', '.jpeg', '.png', '.webp'];
-        const videoExts = ['.mp4', '.m4v', '.mov', '.mkv', '.webm', '.avi', '.mpeg', '.mpg', '.m4s', '.ts'];
-
-        if (imageExts.includes(ext)) {
-          log('send:photo', f);
-          await bot.sendPhoto(msg.chat.id, f, { caption, parse_mode: 'HTML' });
-          sent++;
-        } else {
-          const looksVideo = videoExts.includes(ext) || await isVideoByProbe(f);
-          log('send:classify', { file: f, ext, looksVideo });
-          if (looksVideo) {
-            const sendAsVideo = async (videoPath) => {
-              const meta = await getVideoMeta(videoPath);
-              const thumbPath = await createVideoThumbnail(videoPath);
-              const opts = { caption, parse_mode: 'HTML', supports_streaming: true };
-              if (meta.duration) opts.duration = meta.duration;
-              if (meta.width) opts.width = meta.width;
-              if (meta.height) opts.height = meta.height;
-              if (thumbPath) opts.thumb = thumbPath;
-              try {
-                log('send:video', videoPath, meta);
-                await bot.sendVideo(msg.chat.id, videoPath, opts);
-                return true;
-              } catch (e) {
-                log('send:video:error', e?.message || String(e));
-                const telethonOk = await new Promise((resolve) => {
-                  const pyBin = fs.existsSync('/opt/py/bin/python') ? '/opt/py/bin/python' : 'python3';
-                  const proc = spawn(pyBin, [
-                    '/app/telethon_send.py',
-                    String(msg.chat.id),
-                    videoPath,
-                    caption,
-                    String(meta.duration || ''),
-                    String(thumbPath || ''),
-                  ], { env: process.env });
-                  let perr = '';
-                  let pout = '';
-                  proc.stderr.on('data', (d) => (perr += d.toString()));
-                  proc.stdout.on('data', (d) => (pout += d.toString()));
-                  proc.on('error', (e) => {
-                    log('telethon:spawn:error', e?.message || String(e));
-                    resolve(false);
-                  });
-                  proc.on('close', (code) => {
-                    if (code !== 0) {
-                      log('telethon:error', perr.slice(-1000));
-                      log('telethon:out', pout.slice(-500));
-                    }
-                    resolve(code === 0);
-                  });
-                });
-                return telethonOk;
-              } finally {
-                if (thumbPath) { try { fs.unlinkSync(thumbPath); } catch {} }
-              }
-            };
-
-            let ok = false;
-            let converted = await transcodeToTelegramMp4(f);
-            if (!converted) converted = await remuxToMp4(f);
-            if (converted && fs.existsSync(converted)) {
-              let candidate = converted;
-              const cSize = fs.statSync(candidate).size / (1024 * 1024);
-              if (cSize > 49) {
-                const smaller = await compressToUnderLimit(candidate, 48);
-                if (smaller && fs.existsSync(smaller)) {
-                  try { fs.unlinkSync(candidate); } catch {}
-                  candidate = smaller;
-                }
-              }
-              ok = await sendAsVideo(candidate);
-              try { fs.unlinkSync(candidate); } catch {}
-            }
-
-            if (ok) sent++;
-            else await bot.sendMessage(msg.chat.id, `⏭️ تعذر إرساله كوسائط حتى بعد التحويل/الضغط: ${path.basename(f)}`);
-          } else {
-            await bot.sendMessage(msg.chat.id, `⏭️ تخطيته لأنه ليس صورة/فيديو: ${path.basename(f)}`);
-          }
-        }
-
-        try { fs.unlinkSync(f); } catch {}
-      }
-
-      if (groupName !== '__root__') {
-        try { fs.rmSync(path.join(jobDir, groupName), { recursive: true, force: true }); } catch {}
-      }
-    }
-
-    await bot.sendMessage(msg.chat.id, `✅ تم إرسال ${sent} وسائط.`);
-    log('job:done', { sent, chat: msg.chat.id });
-    fs.rmSync(jobDir, { recursive: true, force: true });
+    const rows = index.groups.map((g, i) => ([{ text: `📁 ${g.groupName} (${g.files.length})`, callback_data: `jg:${idxJobId}:${i}` }]));
+    await bot.sendMessage(msg.chat.id, `✅ Indexed ${files.length} items. اختر مجموعة:`, { reply_markup: { inline_keyboard: rows } });
+    log('job:indexed', { jobId: idxJobId, groups: index.groups.length, files: files.length });
   } catch (e) {
     log('job:error', e?.stack || e?.message || String(e));
     await bot.sendMessage(msg.chat.id, `❌ خطأ: ${e.message}`);
+  }
+});
+
+bot.on('callback_query', async (q) => {
+  try {
+    const data = q.data || '';
+    const chatId = q.message?.chat?.id;
+    if (!chatId) return;
+
+    const parts = data.split(':');
+    const type = parts[0];
+
+    if (type === 'jg') {
+      const [, jobId, gIdxRaw] = parts;
+      const gIdx = Number(gIdxRaw);
+      const job = JOBS.get(jobId);
+      if (!job || !job.groups[gIdx]) return bot.answerCallbackQuery(q.id, { text: 'job expired' });
+      const g = job.groups[gIdx];
+      const postRows = g.posts.slice(0, 20).map((p, pIdx) => ([{ text: `🧩 Post ${p.postId} (${p.items.length})`, callback_data: `jp:${jobId}:${gIdx}:${pIdx}` }]));
+      const rows = [...postRows, ...actionRows(jobId, gIdx)];
+      await bot.editMessageText(`📁 ${g.groupName}\nPosts: ${g.posts.length}\nFiles: ${g.files.length}`, {
+        chat_id: chatId,
+        message_id: q.message.message_id,
+        reply_markup: { inline_keyboard: rows },
+      });
+      return bot.answerCallbackQuery(q.id);
+    }
+
+    if (type === 'jp') {
+      const [, jobId, gIdxRaw, pIdxRaw] = parts;
+      const gIdx = Number(gIdxRaw), pIdx = Number(pIdxRaw);
+      const job = JOBS.get(jobId);
+      const post = job?.groups?.[gIdx]?.posts?.[pIdx];
+      if (!post) return bot.answerCallbackQuery(q.id, { text: 'post not found' });
+      const rows = actionRows(jobId, gIdx, pIdx);
+      await bot.editMessageText(`🧩 Post ${post.postId}\nItems: ${post.items.length}`, {
+        chat_id: chatId,
+        message_id: q.message.message_id,
+        reply_markup: { inline_keyboard: rows },
+      });
+      return bot.answerCallbackQuery(q.id);
+    }
+
+    if (type === 'ag' || type === 'ap') {
+      const jobId = parts[1];
+      const gIdx = Number(parts[2]);
+      const mode = parts[type === 'ag' ? 3 : 4] || 's';
+      const pIdx = type === 'ap' ? Number(parts[3]) : null;
+      const job = JOBS.get(jobId);
+      if (!job) return bot.answerCallbackQuery(q.id, { text: 'job expired' });
+
+      const items = (type === 'ag')
+        ? (job.groups[gIdx]?.files || [])
+        : (job.groups[gIdx]?.posts?.[pIdx]?.items || []);
+
+      await bot.answerCallbackQuery(q.id, { text: 'processing...' });
+      await bot.sendMessage(chatId, `🚀 action=${mode} items=${items.length}`);
+
+      let sent = 0;
+      for (const f of items) {
+        if (!fs.existsSync(f)) continue;
+        const cap = buildCaption({
+          title: job.meta?.title,
+          href: job.meta?.href,
+          fallbackUrl: job.url,
+          fileName: path.basename(f),
+        });
+        const ok = await sendMediaFile(chatId, f, cap, mode);
+        if (ok) sent++;
+        try { fs.unlinkSync(f); } catch {}
+      }
+
+      await bot.sendMessage(chatId, `✅ done. sent=${sent}`);
+
+      // cleanup empty folders/job
+      try {
+        const remain = walk(job.jobDir).filter((f) => !f.endsWith('.json'));
+        if (!remain.length) {
+          fs.rmSync(job.jobDir, { recursive: true, force: true });
+          JOBS.delete(jobId);
+          await bot.sendMessage(chatId, '🧹 cleaned job folder');
+        }
+      } catch {}
+      return;
+    }
+  } catch (e) {
+    log('callback:error', e?.stack || e?.message || String(e));
   }
 });
 
