@@ -86,6 +86,22 @@ function buildCaption({ title, href, fallbackUrl, fileName }) {
   return caption;
 }
 
+async function isVideoByProbe(filePath) {
+  return await new Promise((resolve) => {
+    const p = spawn('ffprobe', [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=codec_type',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      filePath,
+    ]);
+    let out = '';
+    p.stdout.on('data', (d) => (out += d.toString()));
+    p.on('error', () => resolve(false));
+    p.on('close', (code) => resolve(code === 0 && out.toLowerCase().includes('video')));
+  });
+}
+
 async function scrapeMediaLinks(url) {
   const res = await fetch(url, {
     headers: {
@@ -223,12 +239,22 @@ bot.on('message', async (msg) => {
         fileName: path.basename(f),
       });
 
-      if (['.mp4', '.m4v', '.mov', '.mkv', '.webm', '.avi', '.mpeg', '.mpg', '.m4s', '.ts'].includes(ext)) {
-        await bot.sendVideo(msg.chat.id, f, { caption, parse_mode: 'HTML' });
-      } else if (['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
+      const imageExts = ['.jpg', '.jpeg', '.png', '.webp'];
+      const videoExts = ['.mp4', '.m4v', '.mov', '.mkv', '.webm', '.avi', '.mpeg', '.mpg', '.m4s', '.ts'];
+
+      if (imageExts.includes(ext)) {
         await bot.sendPhoto(msg.chat.id, f, { caption, parse_mode: 'HTML' });
       } else {
-        await bot.sendDocument(msg.chat.id, f, { caption, parse_mode: 'HTML' }, { filename: path.basename(f) });
+        const looksVideo = videoExts.includes(ext) || await isVideoByProbe(f);
+        if (looksVideo) {
+          try {
+            await bot.sendVideo(msg.chat.id, f, { caption, parse_mode: 'HTML', supports_streaming: true });
+          } catch {
+            await bot.sendDocument(msg.chat.id, f, { caption, parse_mode: 'HTML' }, { filename: path.basename(f) });
+          }
+        } else {
+          await bot.sendDocument(msg.chat.id, f, { caption, parse_mode: 'HTML' }, { filename: path.basename(f) });
+        }
       }
       sent++;
     }
