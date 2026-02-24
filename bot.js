@@ -102,6 +102,26 @@ async function isVideoByProbe(filePath) {
   });
 }
 
+async function transcodeToTelegramMp4(inputPath) {
+  const outputPath = inputPath.replace(/\.[^/.]+$/, '') + '.tg.mp4';
+  return await new Promise((resolve) => {
+    const p = spawn('ffmpeg', [
+      '-y',
+      '-i', inputPath,
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-crf', '24',
+      '-pix_fmt', 'yuv420p',
+      '-movflags', '+faststart',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      outputPath,
+    ]);
+    p.on('error', () => resolve(null));
+    p.on('close', (code) => resolve(code === 0 ? outputPath : null));
+  });
+}
+
 async function scrapeMediaLinks(url) {
   const res = await fetch(url, {
     headers: {
@@ -250,7 +270,19 @@ bot.on('message', async (msg) => {
           try {
             await bot.sendVideo(msg.chat.id, f, { caption, parse_mode: 'HTML', supports_streaming: true });
           } catch {
-            await bot.sendDocument(msg.chat.id, f, { caption, parse_mode: 'HTML' }, { filename: path.basename(f) });
+            // Convert to Telegram-friendly mp4 then retry as media
+            const converted = await transcodeToTelegramMp4(f);
+            if (converted && fs.existsSync(converted)) {
+              try {
+                await bot.sendVideo(msg.chat.id, converted, { caption, parse_mode: 'HTML', supports_streaming: true });
+              } catch {
+                await bot.sendDocument(msg.chat.id, f, { caption, parse_mode: 'HTML' }, { filename: path.basename(f) });
+              } finally {
+                try { fs.unlinkSync(converted); } catch {}
+              }
+            } else {
+              await bot.sendDocument(msg.chat.id, f, { caption, parse_mode: 'HTML' }, { filename: path.basename(f) });
+            }
           }
         } else {
           await bot.sendDocument(msg.chat.id, f, { caption, parse_mode: 'HTML' }, { filename: path.basename(f) });
