@@ -26,7 +26,7 @@ class FapopelloExtractor(Extractor):
 
             for path, post_id in post_links:
                 post_url = "https://fapopello.com" + path
-                yield Message.Directory, None, {"user": user}
+                yield Message.Directory, {"user": user}
                 yield from self._extract_post_media(post_url, user, post_id, metadata)
 
             # Pagination

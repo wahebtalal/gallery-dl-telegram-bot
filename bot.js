@@ -215,7 +215,7 @@ bot.on('message', async (msg) => {
                 } else if (/\.(jpg|jpeg|png|webp|gif)(\?|$)/i.test(link)) {
                   await bot.sendPhoto(msg.chat.id, link, { caption, parse_mode: 'HTML' });
                 } else {
-                  await bot.sendDocument(msg.chat.id, link, { caption, parse_mode: 'HTML' });
+                  await bot.sendMessage(msg.chat.id, `⏭️ تم تخطي رابط غير صورة/فيديو: ${link}`);
                 }
               } catch {
                 await bot.sendMessage(msg.chat.id, link);
@@ -278,16 +278,16 @@ bot.on('message', async (msg) => {
               try {
                 await bot.sendVideo(msg.chat.id, converted, { caption, parse_mode: 'HTML', supports_streaming: true });
               } catch {
-                await bot.sendDocument(msg.chat.id, f, { caption, parse_mode: 'HTML' }, { filename: path.basename(f) });
+                await bot.sendMessage(msg.chat.id, `⏭️ تعذر إرساله كوسائط بعد التحويل: ${path.basename(f)}`);
               } finally {
                 try { fs.unlinkSync(converted); } catch {}
               }
             } else {
-              await bot.sendDocument(msg.chat.id, f, { caption, parse_mode: 'HTML' }, { filename: path.basename(f) });
+              await bot.sendMessage(msg.chat.id, `⏭️ تخطيته لأنه ليس فيديو قابل للإرسال كوسائط: ${path.basename(f)}`);
             }
           }
         } else {
-          await bot.sendDocument(msg.chat.id, f, { caption, parse_mode: 'HTML' }, { filename: path.basename(f) });
+          await bot.sendMessage(msg.chat.id, `⏭️ تخطيته لأنه ليس صورة/فيديو: ${path.basename(f)}`);
         }
       }
       sent++;
