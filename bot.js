@@ -345,7 +345,7 @@ async function runCommandLogged(bin, commandArgs = [], timeoutMs = 180000) {
   });
 }
 
-async function extractUrlsToFile(url, jobDir) {
+async function extractUrlsCount(url) {
   const args = [
     '--simulate', '--get-url',
     '-X', '/app/extractors',
@@ -357,10 +357,9 @@ async function extractUrlsToFile(url, jobDir) {
   args.push(url);
   const r = await runCommandLogged('gallery-dl', args, 120000);
   const lines = (r.out || '').split('\n').map(s => s.trim()).filter(s => /^https?:\/\//i.test(s));
-  const outPath = path.join(jobDir, 'urls.txt');
-  try { fs.writeFileSync(outPath, lines.join('\n') + '\n', 'utf8'); } catch {}
-  log('urls:extracted', lines.length, outPath);
-  return { code: r.code, urls: lines, path: outPath, err: r.err || '' };
+  const unique = [...new Set(lines)];
+  log('urls:extracted', unique.length);
+  return { code: r.code, count: unique.length, err: r.err || '' };
 }
 
 async function downloadToJob(url, jobDir) {
@@ -619,7 +618,7 @@ bot.on('message', async (msg) => {
                   await bot.sendMessage(msg.chat.id, `⏭️ تم تخطي رابط غير صورة/فيديو: ${link}`);
                 }
               } catch {
-                await bot.sendMessage(msg.chat.id, link);
+                log('fallback:send-failed', link);
               }
               sent++;
             }
@@ -682,9 +681,9 @@ bot.on('callback_query', async (q) => {
       log('job:start', { chat: chatId, from: q.from?.id, url: pending.url, mode });
       log('job:dir', jobDir);
 
-      const urlList = await extractUrlsToFile(pending.url, jobDir);
-      if (urlList.urls?.length) {
-        await bot.sendMessage(chatId, `🔗 Extracted URLs: ${urlList.urls.length}\nSaved: urls.txt`);
+      const urlList = await extractUrlsCount(pending.url);
+      if (urlList.count) {
+        await bot.sendMessage(chatId, `🔗 Extracted URLs: ${urlList.count}`);
       }
 
       const { result, files } = await downloadToJob(pending.url, jobDir);
