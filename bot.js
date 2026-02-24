@@ -18,6 +18,10 @@ fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
+function log(...args) {
+  console.log(new Date().toISOString(), '-', ...args);
+}
+
 function isAllowed(msg) {
   if (!ALLOWED_USER_ID) return true;
   return Number(msg.from?.id || 0) === ALLOWED_USER_ID;
@@ -199,9 +203,11 @@ bot.on('message', async (msg) => {
     if (!isUrl(url)) return bot.sendMessage(msg.chat.id, 'ارسل رابط صحيح.');
 
     await bot.sendMessage(msg.chat.id, '⏳ جاري التحميل...');
+    log('job:start', { chat: msg.chat.id, from: msg.from?.id, url });
 
     const jobDir = path.join(DOWNLOAD_DIR, `job-${Date.now()}-${Math.random().toString(36).slice(2,8)}`);
     fs.mkdirSync(jobDir, { recursive: true });
+    log('job:dir', jobDir);
 
     const args = ['-D', jobDir, '--write-metadata', '--no-mtime', '-X', '/app/extractors/fapopello.py'];
     if (API_ID) args.push('-o', `extractor.telegram.api-id=${API_ID}`);
@@ -209,22 +215,41 @@ bot.on('message', async (msg) => {
     if (STRING_SESSION) args.push('-o', `extractor.telegram.session=${STRING_SESSION}`);
     args.push(url);
 
-    async function runCommand(bin, commandArgs = []) {
+    async function runCommand(bin, commandArgs = [], timeoutMs = 180000) {
       return await new Promise((resolve) => {
+        log('cmd:start', bin, commandArgs.join(' '));
         const proc = spawn(bin, commandArgs, { env: process.env });
         let err = '';
-        proc.stderr.on('data', (d) => (err += d.toString()));
-        proc.on('error', (e) => resolve({ code: 127, err: String(e?.message || e), tool: bin }));
-        proc.on('close', (code) => resolve({ code, err, tool: bin }));
+        let out = '';
+        const timer = setTimeout(() => {
+          try { proc.kill('SIGKILL'); } catch {}
+          log('cmd:timeout', bin, timeoutMs);
+          resolve({ code: 124, err: `timeout after ${timeoutMs}ms`, out, tool: bin });
+        }, timeoutMs);
+        proc.stderr.on('data', (d) => { err += d.toString(); });
+        proc.stdout.on('data', (d) => { out += d.toString(); });
+        proc.on('error', (e) => {
+          clearTimeout(timer);
+          log('cmd:error', bin, String(e?.message || e));
+          resolve({ code: 127, err: String(e?.message || e), out, tool: bin });
+        });
+        proc.on('close', (code) => {
+          clearTimeout(timer);
+          log('cmd:close', bin, 'code=', code);
+          resolve({ code, err, out, tool: bin });
+        });
       });
     }
 
     // 1) gallery-dl primary
     let result = await runCommand('gallery-dl', args);
+    log('gallery-dl:result', result.code);
 
     // 2) gallery-dl python fallback
     if (result.code === 127) {
+      log('gallery-dl:fallback', 'python -m gallery_dl');
       result = await runCommand('python3', ['-m', 'gallery_dl', ...args]);
+      log('gallery-dl(py):result', result.code);
     }
 
     // 3) yt-dlp fallback for unsupported links
@@ -233,6 +258,7 @@ bot.on('message', async (msg) => {
       const ytdlpOut = path.join(jobDir, '%(title).80s [%(id)s].%(ext)s');
       const ytdlpArgs = ['--no-playlist', '-o', ytdlpOut, url];
       const ytdlpResult = await runCommand('yt-dlp', ytdlpArgs);
+      log('yt-dlp:result', ytdlpResult.code);
 
       if (ytdlpResult.code === 0) {
         result = { code: 0, err: '', tool: 'yt-dlp' };
@@ -283,6 +309,7 @@ bot.on('message', async (msg) => {
     }
 
     const files = walk(jobDir).filter((f) => !f.endsWith('.json'));
+    log('job:files', files.length);
     if (!files.length) {
       await bot.sendMessage(msg.chat.id, 'تم التنفيذ لكن لا توجد ملفات للإرسال.');
       fs.rmSync(jobDir, { recursive: true, force: true });
@@ -368,8 +395,10 @@ bot.on('message', async (msg) => {
     }
 
     await bot.sendMessage(msg.chat.id, `✅ تم إرسال ${sent} ملف/وسائط.`);
+    log('job:done', { sent, chat: msg.chat.id });
     fs.rmSync(jobDir, { recursive: true, force: true });
   } catch (e) {
+    log('job:error', e?.stack || e?.message || String(e));
     await bot.sendMessage(msg.chat.id, `❌ خطأ: ${e.message}`);
   }
 });
