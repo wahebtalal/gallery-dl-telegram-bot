@@ -1,0 +1,25 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="card">
+  <form method="post" action="/retry-failed-sends" class="inline">
+    <button>{{ t(lang, 'retry_failed') }}</button>
+  </form>
+</section>
+<section class="card">
+  <table>
+    <thead><tr><th>ID</th><th>media_item_id</th><th>action</th><th>status</th><th>detail</th><th>created_at</th></tr></thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>{{ row.id }}</td><td>{{ row.media_item_id }}</td><td>{{ row.action }}</td><td>{{ row.status }}</td><td><small>{{ row.detail }}</small></td><td>{{ row.created_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="pager">
+    {% if page > 1 %}<a href="/history?page={{page-1}}">{{ t(lang, 'prev') }}</a>{% endif %}
+    <span>{{ t(lang, 'page') }} {{ page }} / {{ pages }}</span>
+    {% if page < pages %}<a href="/history?page={{page+1}}">{{ t(lang, 'next') }}</a>{% endif %}
+  </div>
+</section>
+{% endblock %}

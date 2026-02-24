@@ -1,0 +1,45 @@
+version: '3.9'
+services:
+  web:
+    build: .
+    container_name: media_dashboard_web
+    env_file: .env
+    volumes:
+      - ./data/media:/data/media
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+
+  worker:
+    build: .
+    container_name: media_dashboard_worker
+    command: celery -A app.celery_app.celery_app worker --loglevel=info
+    env_file: .env
+    volumes:
+      - ./data/media:/data/media
+    depends_on:
+      - db
+      - redis
+
+  db:
+    image: postgres:16
+    container_name: media_dashboard_db
+    environment:
+      POSTGRES_DB: media_dashboard
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7
+    container_name: media_dashboard_redis
+    ports:
+      - "6379:6379"
+
+volumes:
+  pgdata:

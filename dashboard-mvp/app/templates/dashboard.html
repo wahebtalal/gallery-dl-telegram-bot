@@ -1,0 +1,59 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="card">
+  <form method="post" action="/submit" class="inline">
+    <input name="source_url" placeholder="{{ t(lang, 'url') }}" required>
+    <button type="submit">{{ t(lang, 'submit_url') }}</button>
+  </form>
+</section>
+
+<section class="card">
+  <form method="get" action="/dashboard" class="inline">
+    <label>{{ t(lang, 'filter_status') }}</label>
+    <select name="status">
+      {% for s in ['all','queued','downloading','downloaded','failed','sent','send_failed'] %}
+      <option value="{{s}}" {% if status == s %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+    <input name="q" value="{{ q }}" placeholder="search URL" />
+    <button type="submit">Go</button>
+  </form>
+
+  <form method="post" action="/bulk/select" class="inline">
+    <input type="hidden" name="status" value="{{status}}"><input type="hidden" name="q" value="{{q}}">
+    <button>{{ t(lang, 'select_all') }}</button>
+  </form>
+  <form method="post" action="/bulk/deselect" class="inline">
+    <input type="hidden" name="status" value="{{status}}"><input type="hidden" name="q" value="{{q}}">
+    <button>{{ t(lang, 'deselect_all') }}</button>
+  </form>
+  <form method="post" action="/send-selected" class="inline"><button>{{ t(lang, 'send_selected') }}</button></form>
+</section>
+
+<section class="card">
+  <table>
+    <thead><tr><th>ID</th><th>{{ t(lang, 'url') }}</th><th>File</th><th>{{ t(lang, 'status') }}</th><th>{{ t(lang, 'selected') }}</th><th>{{ t(lang, 'actions') }}</th></tr></thead>
+    <tbody>
+    {% for item in items %}
+      <tr>
+        <td>{{ item.id }}</td>
+        <td><small>{{ item.source_url }}</small></td>
+        <td>{{ item.filename or '-' }}</td>
+        <td>{{ item.status }}</td>
+        <td>{{ '✓' if item.selected else '' }}</td>
+        <td>
+          <form method="post" action="/item/{{ item.id }}/toggle">
+            <button>{{ t(lang, 'deselect') if item.selected else t(lang, 'select') }}</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <div class="pager">
+    {% if page > 1 %}<a href="/dashboard?page={{page-1}}&status={{status}}&q={{q}}">{{ t(lang, 'prev') }}</a>{% endif %}
+    <span>{{ t(lang, 'page') }} {{ page }} / {{ pages }}</span>
+    {% if page < pages %}<a href="/dashboard?page={{page+1}}&status={{status}}&q={{q}}">{{ t(lang, 'next') }}</a>{% endif %}
+  </div>
+</section>
+{% endblock %}
