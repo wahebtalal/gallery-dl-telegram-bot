@@ -82,8 +82,13 @@ function actionRows(jobId, gIdx, pIdx = null) {
   const target = pIdx === null ? `ag:${jobId}:${gIdx}:` : `ap:${jobId}:${gIdx}:${pIdx}:`;
   return [
     [
-      { text: '📤 Send', callback_data: `${target}s` },
+      { text: '📤 Original', callback_data: `${target}oq` },
+      { text: '🎬 HD', callback_data: `${target}hd` },
+      { text: '📱 SD', callback_data: `${target}sd` },
+    ],
+    [
       { text: '🗜 Compress', callback_data: `${target}c` },
+      { text: '✨ Lossless', callback_data: `${target}lq` },
     ],
     [
       { text: '🖼 Screenshots', callback_data: `${target}h` },
@@ -228,6 +233,35 @@ async function compressToUnderLimit(inputPath, targetMB = 48) {
   });
 }
 
+async function transcodeProfile(inputPath, profile = 'hd') {
+  const outputPath = inputPath.replace(/\.[^/.]+$/, '') + `.${profile}.mp4`;
+  const profiles = {
+    hd: ['-vf', 'scale=1280:-2,fps=30', '-crf', '23', '-b:a', '128k'],
+    sd: ['-vf', 'scale=854:-2,fps=24', '-crf', '30', '-b:a', '96k'],
+    lq: ['-vf', 'scale=1920:-2,fps=30', '-crf', '18', '-b:a', '160k'],
+  };
+  const cfg = profiles[profile] || profiles.hd;
+  return await new Promise((resolve) => {
+    log('ffmpeg:profile:start', profile, inputPath, '->', outputPath);
+    const p = spawn('ffmpeg', [
+      '-y', '-i', inputPath,
+      ...cfg,
+      '-c:v', 'libx264', '-preset', 'veryfast',
+      '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+      '-c:a', 'aac', '-ac', '2',
+      outputPath,
+    ]);
+    let err = '';
+    p.stderr.on('data', (d) => (err += d.toString()));
+    p.on('error', () => resolve(null));
+    p.on('close', (code) => {
+      log('ffmpeg:profile:close', profile, code);
+      if (code !== 0) log('ffmpeg:profile:error', err.slice(-1200));
+      resolve(code === 0 ? outputPath : null);
+    });
+  });
+}
+
 async function getVideoMeta(filePath) {
   return await new Promise((resolve) => {
     const p = spawn('ffprobe', [
@@ -335,7 +369,14 @@ async function sendMediaFile(chatId, filePath, caption, mode = 's') {
   }
 
   let source = filePath;
-  if (mode === 'c') {
+  if (mode === 'oq') {
+    // original quality, only remux if needed
+    const remux = await remuxToMp4(filePath);
+    if (remux) source = remux;
+  } else if (mode === 'hd' || mode === 'sd' || mode === 'lq') {
+    const prof = await transcodeProfile(filePath, mode);
+    if (prof) source = prof;
+  } else if (mode === 'c') {
     const c = await compressToUnderLimit(filePath, 48);
     if (c) source = c;
   } else if (mode === 't') {
