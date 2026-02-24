@@ -234,7 +234,13 @@ bot.on('message', async (msg) => {
     fs.mkdirSync(jobDir, { recursive: true });
     log('job:dir', jobDir);
 
-    const args = ['-D', jobDir, '--write-metadata', '--no-mtime', '-X', '/app/extractors/fapopello.py'];
+    const args = [
+      '-D', jobDir,
+      '--write-metadata',
+      '--no-mtime',
+      '-X', 'fapopello',
+      '-o', 'extractor.module-sources=/app/extractors',
+    ];
     if (API_ID) args.push('-o', `extractor.telegram.api-id=${API_ID}`);
     if (API_HASH) args.push('-o', `extractor.telegram.api-hash=${API_HASH}`);
     if (STRING_SESSION) args.push('-o', `extractor.telegram.session=${STRING_SESSION}`);
@@ -269,6 +275,7 @@ bot.on('message', async (msg) => {
     // 1) gallery-dl primary
     let result = await runCommand('gallery-dl', args);
     log('gallery-dl:result', result.code);
+    if (result.code !== 0) log('gallery-dl:stderr', (result.err || '').slice(-1200));
 
     // 2) gallery-dl python fallback
     if (result.code === 127) {
