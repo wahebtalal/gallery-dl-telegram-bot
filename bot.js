@@ -172,6 +172,12 @@ function buildCaption({ title, href, fallbackUrl, fileName }) {
   return caption;
 }
 
+async function updateProgress(chatId, messageId, text) {
+  try {
+    await bot.editMessageText(text, { chat_id: chatId, message_id: messageId });
+  } catch {}
+}
+
 async function isVideoByProbe(filePath) {
   return await new Promise((resolve) => {
     const p = spawn('ffprobe', [
@@ -754,14 +760,16 @@ bot.on('callback_query', async (q) => {
       if (!pending?.pending) return bot.answerCallbackQuery(q.id, { text: 'job expired' });
 
       await bot.answerCallbackQuery(q.id, { text: 'starting download...' });
-      await bot.sendMessage(chatId, '⏳ جاري التحميل حسب الخيار...');
+      const progressMsg = await bot.sendMessage(chatId, '⏳ بدء المهمة...');
 
       const jobDir = path.join(DOWNLOAD_DIR, `job-${Date.now()}-${Math.random().toString(36).slice(2,8)}`);
       fs.mkdirSync(jobDir, { recursive: true });
       log('job:start', { chat: chatId, from: q.from?.id, url: pending.url, mode });
       log('job:dir', jobDir);
 
-      await extractUrlsCount(pending.url);
+      const urlList = await extractUrlsCount(pending.url);
+      const totalHint = Math.max(1, Number(urlList.count || 0));
+      await updateProgress(chatId, progressMsg.message_id, `📥 التنزيل: 10%\n📦 الملفات المتوقعة: ${totalHint}\n📤 الرفع: 0%\n📄 الحالي: 0/${totalHint}`);
 
       const { result, files } = await downloadToJob(pending.url, jobDir);
       if (result.code !== 0) {
@@ -778,9 +786,12 @@ bot.on('callback_query', async (q) => {
         return;
       }
 
+      await updateProgress(chatId, progressMsg.message_id, `📥 التنزيل: 100%\n📦 الملفات: ${files.length}\n📤 الرفع: 0%\n📄 الحالي: 0/${files.length}`);
+
       if (mode === 'idx') {
         const idxJobId = Math.random().toString(36).slice(2, 8);
         const index = buildIndex(idxJobId, jobDir, files);
+        await updateProgress(chatId, progressMsg.message_id, `📥 التنزيل: 100%\n📦 الملفات: ${files.length}\n📤 الرفع: 0%\n📄 الحالي: 0/${files.length}\n📚 تم إنشاء الفهرس`);
         const meta = findMetadata(jobDir);
         index.meta = meta;
         index.url = pending.url;
@@ -789,7 +800,12 @@ bot.on('callback_query', async (q) => {
       } else {
         const meta = findMetadata(jobDir);
         let sent = 0;
-        for (const f of files.slice(0, 200)) {
+        const uploadFiles = files.slice(0, 200);
+        for (let i = 0; i < uploadFiles.length; i++) {
+          const f = uploadFiles[i];
+          const upPct = Math.max(0, Math.min(99, Math.round((i / uploadFiles.length) * 100)));
+          await updateProgress(chatId, progressMsg.message_id, `📥 التنزيل: 100%\n📦 الملفات: ${uploadFiles.length}\n📤 الرفع: ${upPct}%\n📄 الحالي: ${i + 1}/${uploadFiles.length}`);
+
           const cap = buildCaption({ title: meta.title, href: meta.href, fallbackUrl: pending.url, fileName: path.basename(f) });
           const sourceMediaUrl = detectSourceUrlForFile(f, pending.url);
           let keyboard = null;
@@ -803,6 +819,7 @@ bot.on('callback_query', async (q) => {
           try { fs.unlinkSync(f); } catch {}
           try { fs.unlinkSync(`${f}.json`); } catch {}
         }
+        await updateProgress(chatId, progressMsg.message_id, `📥 التنزيل: 100%\n📦 الملفات: ${uploadFiles.length}\n📤 الرفع: 100%\n📄 الحالي: ${uploadFiles.length}/${uploadFiles.length}\n✅ done. sent=${sent}`);
         await bot.sendMessage(chatId, `✅ done. sent=${sent}`);
         try { fs.rmSync(jobDir, { recursive: true, force: true }); } catch {}
       }
