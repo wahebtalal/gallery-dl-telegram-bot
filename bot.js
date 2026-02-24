@@ -12,6 +12,7 @@ const API_ID = process.env.API_ID || '';
 const API_HASH = process.env.API_HASH || '';
 const STRING_SESSION = process.env.STRING_SESSION || '';
 const ADMIN_CHAT_ID = Number(process.env.ADMIN_CHAT_ID || ALLOWED_USER_ID || 0);
+const HAS_VALID_TELETHON_SESSION = !!(STRING_SESSION && STRING_SESSION.length > 100 && !/\s/.test(STRING_SESSION));
 
 if (!BOT_TOKEN) throw new Error('BOT_TOKEN is required');
 fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
@@ -41,6 +42,11 @@ function walk(dir, out = []) {
     else out.push(p);
   }
   return out;
+}
+
+function isSendableFile(f) {
+  const n = path.basename(f).toLowerCase();
+  return !n.endsWith('.json') && !n.endsWith('.part') && !n.endsWith('.ytdl') && !n.endsWith('.tmp');
 }
 
 function groupFilesByTopFolder(baseDir, files) {
@@ -403,7 +409,7 @@ async function downloadToJob(url, jobDir) {
     log('gallery-dl(py):result', result.code);
   }
 
-  const partialFiles = walk(jobDir).filter((f) => !f.endsWith('.json'));
+  const partialFiles = walk(jobDir).filter((f) => isSendableFile(f));
   if (result.code === 124 && partialFiles.length > 0) {
     result = { code: 0, err: '', tool: 'gallery-dl(partial)' };
   }
@@ -417,7 +423,7 @@ async function downloadToJob(url, jobDir) {
     else result = ytdlpResult;
   }
 
-  const files = walk(jobDir).filter((f) => !f.endsWith('.json'));
+  const files = walk(jobDir).filter((f) => isSendableFile(f));
   return { result, files };
 }
 
@@ -532,8 +538,38 @@ async function sendMediaFile(chatId, filePath, caption, mode = 's', inlineKeyboa
     });
     return { ok: true, kind: 'video', messageId: sent?.message_id };
   } catch (e) {
-    log('send:video:error', e?.message || String(e));
-    const ok = await telethonSendVideo(chatId, source, caption, meta.duration, thumb);
+    const emsg = e?.message || String(e);
+    log('send:video:error', emsg);
+
+    if (/413|Request Entity Too Large/i.test(emsg)) {
+      const smaller = await compressToUnderLimit(source, 45);
+      if (smaller) {
+        const m2 = await getVideoMeta(smaller);
+        try {
+          const sent2 = await bot.sendVideo(chatId, smaller, {
+            caption,
+            parse_mode: 'HTML',
+            supports_streaming: true,
+            duration: m2.duration,
+            width: m2.width,
+            height: m2.height,
+            reply_markup: inlineKeyboard ? { inline_keyboard: inlineKeyboard } : undefined,
+          });
+          try { fs.unlinkSync(smaller); } catch {}
+          return { ok: true, kind: 'video', messageId: sent2?.message_id };
+        } catch (e2) {
+          log('send:video:small:error', e2?.message || String(e2));
+        }
+        try { fs.unlinkSync(smaller); } catch {}
+      }
+    }
+
+    let ok = false;
+    if (HAS_VALID_TELETHON_SESSION) {
+      ok = await telethonSendVideo(chatId, source, caption, meta.duration, thumb);
+    } else {
+      log('telethon:skip', 'invalid or missing STRING_SESSION');
+    }
     return { ok, kind: 'video' };
   } finally {
     if (thumb) { try { fs.unlinkSync(thumb); } catch {} }
@@ -625,7 +661,7 @@ bot.on('message', async (msg) => {
     }
 
     // If gallery-dl timed out but produced files, continue with partial results
-    const partialFiles = walk(jobDir).filter((f) => !f.endsWith('.json'));
+    const partialFiles = walk(jobDir).filter((f) => isSendableFile(f));
     if (result.code === 124 && partialFiles.length > 0) {
       log('gallery-dl:partial-after-timeout', partialFiles.length);
       result = { code: 0, err: '', tool: 'gallery-dl(partial)' };
@@ -687,7 +723,7 @@ bot.on('message', async (msg) => {
       return;
     }
 
-    const files = walk(jobDir).filter((f) => !f.endsWith('.json'));
+    const files = walk(jobDir).filter((f) => isSendableFile(f));
     log('job:files', files.length);
     if (!files.length) {
       await bot.sendMessage(msg.chat.id, 'تم التنفيذ لكن لا توجد ملفات للإرسال.');
