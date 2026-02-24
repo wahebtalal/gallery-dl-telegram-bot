@@ -192,7 +192,7 @@ bot.on('message', async (msg) => {
     const jobDir = path.join(DOWNLOAD_DIR, `job-${Date.now()}-${Math.random().toString(36).slice(2,8)}`);
     fs.mkdirSync(jobDir, { recursive: true });
 
-    const args = ['-D', jobDir, '--write-metadata', '--no-mtime'];
+    const args = ['-D', jobDir, '--write-metadata', '--no-mtime', '-X', '/app/extractors/fapopello.py'];
     if (API_ID) args.push('-o', `extractor.telegram.api-id=${API_ID}`);
     if (API_HASH) args.push('-o', `extractor.telegram.api-hash=${API_HASH}`);
     if (STRING_SESSION) args.push('-o', `extractor.telegram.session=${STRING_SESSION}`);
@@ -314,7 +314,20 @@ bot.on('message', async (msg) => {
               await bot.sendVideo(msg.chat.id, videoPath, opts);
               return true;
             } catch {
-              return false;
+              // Telethon fallback (user session) to force media send
+              const telethonOk = await new Promise((resolve) => {
+                const proc = spawn('python3', [
+                  '/app/telethon_send.py',
+                  String(msg.chat.id),
+                  videoPath,
+                  caption,
+                  String(duration || ''),
+                  String(thumbPath || ''),
+                ], { env: process.env });
+                proc.on('error', () => resolve(false));
+                proc.on('close', (code) => resolve(code === 0));
+              });
+              return telethonOk;
             } finally {
               if (thumbPath) { try { fs.unlinkSync(thumbPath); } catch {} }
             }
