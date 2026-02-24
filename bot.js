@@ -364,7 +364,25 @@ bot.on('message', async (msg) => {
               return true;
             } catch (e) {
               log('send:video:error', e?.message || String(e));
-              return false;
+              // Telethon fallback to force media
+              const telethonOk = await new Promise((resolve) => {
+                const proc = spawn('python3', [
+                  '/app/telethon_send.py',
+                  String(msg.chat.id),
+                  videoPath,
+                  caption,
+                  String(meta.duration || ''),
+                  String(thumbPath || ''),
+                ], { env: process.env });
+                let perr = '';
+                proc.stderr.on('data', (d) => (perr += d.toString()));
+                proc.on('error', () => resolve(false));
+                proc.on('close', (code) => {
+                  if (code !== 0) log('telethon:error', perr.slice(-800));
+                  resolve(code === 0);
+                });
+              });
+              return telethonOk;
             } finally {
               if (thumbPath) { try { fs.unlinkSync(thumbPath); } catch {} }
             }
