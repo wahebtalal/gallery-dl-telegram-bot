@@ -41,6 +41,18 @@ function walk(dir, out = []) {
   return out;
 }
 
+function groupFilesByTopFolder(baseDir, files) {
+  const groups = new Map();
+  for (const f of files) {
+    const rel = path.relative(baseDir, f);
+    const parts = rel.split(path.sep);
+    const key = parts.length > 1 ? parts[0] : '__root__';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(f);
+  }
+  return groups;
+}
+
 function extractMediaLinks(html) {
   const normalized = String(html || '').replace(/\\\//g, '/');
   const re = /https?:\/\/[^\s"'<>]+\.(?:mp4|m4v|mov|mkv|webm|avi|m4s|ts|m3u8|jpg|jpeg|png|gif|webp)(?:\?[^\s"'<>]*)?/gi;
@@ -284,6 +296,13 @@ bot.on('message', async (msg) => {
       log('gallery-dl(py):result', result.code);
     }
 
+    // If gallery-dl timed out but produced files, continue with partial results
+    const partialFiles = walk(jobDir).filter((f) => !f.endsWith('.json'));
+    if (result.code === 124 && partialFiles.length > 0) {
+      log('gallery-dl:partial-after-timeout', partialFiles.length);
+      result = { code: 0, err: '', tool: 'gallery-dl(partial)' };
+    }
+
     // 3) yt-dlp fallback for unsupported links
     if (result.code !== 0) {
       await bot.sendMessage(msg.chat.id, '↪️ gallery-dl فشل، جاري المحاولة بـ yt-dlp...');
@@ -351,90 +370,94 @@ bot.on('message', async (msg) => {
     const meta = findMetadata(jobDir);
 
     let sent = 0;
-    for (const f of files.slice(0, 10)) {
-      const size = fs.statSync(f).size / (1024 * 1024);
-      if (size > 49) {
-        await bot.sendMessage(msg.chat.id, `⚠️ تخطيت ملف كبير: ${path.basename(f)} (${size.toFixed(1)}MB)`);
-        continue;
-      }
+    const groups = groupFilesByTopFolder(jobDir, files);
 
-      const ext = path.extname(f).toLowerCase();
-      const caption = buildCaption({
-        title: meta.title,
-        href: meta.href,
-        fallbackUrl: url,
-        fileName: path.basename(f),
-      });
-
-      const imageExts = ['.jpg', '.jpeg', '.png', '.webp'];
-      const videoExts = ['.mp4', '.m4v', '.mov', '.mkv', '.webm', '.avi', '.mpeg', '.mpg', '.m4s', '.ts'];
-
-      if (imageExts.includes(ext)) {
-        log('send:photo', f);
-        await bot.sendPhoto(msg.chat.id, f, { caption, parse_mode: 'HTML' });
-      } else {
-        const looksVideo = videoExts.includes(ext) || await isVideoByProbe(f);
-        log('send:classify', { file: f, ext, looksVideo });
-        if (looksVideo) {
-          const sendAsVideo = async (videoPath) => {
-            const meta = await getVideoMeta(videoPath);
-            const thumbPath = await createVideoThumbnail(videoPath);
-            const opts = { caption, parse_mode: 'HTML', supports_streaming: true };
-            if (meta.duration) opts.duration = meta.duration;
-            if (meta.width) opts.width = meta.width;
-            if (meta.height) opts.height = meta.height;
-            if (thumbPath) opts.thumb = thumbPath;
-            try {
-              log('send:video', videoPath, meta);
-              await bot.sendVideo(msg.chat.id, videoPath, opts);
-              return true;
-            } catch (e) {
-              log('send:video:error', e?.message || String(e));
-              // Telethon fallback to force media
-              const telethonOk = await new Promise((resolve) => {
-                const proc = spawn('python3', [
-                  '/app/telethon_send.py',
-                  String(msg.chat.id),
-                  videoPath,
-                  caption,
-                  String(meta.duration || ''),
-                  String(thumbPath || ''),
-                ], { env: process.env });
-                let perr = '';
-                proc.stderr.on('data', (d) => (perr += d.toString()));
-                proc.on('error', () => resolve(false));
-                proc.on('close', (code) => {
-                  if (code !== 0) log('telethon:error', perr.slice(-800));
-                  resolve(code === 0);
-                });
-              });
-              return telethonOk;
-            } finally {
-              if (thumbPath) { try { fs.unlinkSync(thumbPath); } catch {} }
-            }
-          };
-
-          // Always encode first to Telegram-friendly mp4, never send as document
-          let ok = false;
-          let converted = await transcodeToTelegramMp4(f);
-          if (!converted) converted = await remuxToMp4(f);
-
-          if (converted && fs.existsSync(converted)) {
-            ok = await sendAsVideo(converted);
-            try { fs.unlinkSync(converted); } catch {}
-          }
-
-          if (!ok) {
-            await bot.sendMessage(msg.chat.id, `⏭️ تعذر إرساله كوسائط حتى بعد التحويل: ${path.basename(f)}`);
-          }
-        } else {
-          await bot.sendMessage(msg.chat.id, `⏭️ تخطيته لأنه ليس صورة/فيديو: ${path.basename(f)}`);
+    for (const [groupName, groupFiles] of groups.entries()) {
+      await bot.sendMessage(msg.chat.id, `📦 batch: ${groupName} (${groupFiles.length})`);
+      for (const f of groupFiles.slice(0, 30)) {
+        const size = fs.statSync(f).size / (1024 * 1024);
+        if (size > 49) {
+          await bot.sendMessage(msg.chat.id, `⚠️ تخطيت ملف كبير: ${path.basename(f)} (${size.toFixed(1)}MB)`);
+          continue;
         }
+
+        const ext = path.extname(f).toLowerCase();
+        const caption = buildCaption({
+          title: meta.title,
+          href: meta.href,
+          fallbackUrl: url,
+          fileName: path.basename(f),
+        });
+
+        const imageExts = ['.jpg', '.jpeg', '.png', '.webp'];
+        const videoExts = ['.mp4', '.m4v', '.mov', '.mkv', '.webm', '.avi', '.mpeg', '.mpg', '.m4s', '.ts'];
+
+        if (imageExts.includes(ext)) {
+          log('send:photo', f);
+          await bot.sendPhoto(msg.chat.id, f, { caption, parse_mode: 'HTML' });
+          sent++;
+        } else {
+          const looksVideo = videoExts.includes(ext) || await isVideoByProbe(f);
+          log('send:classify', { file: f, ext, looksVideo });
+          if (looksVideo) {
+            const sendAsVideo = async (videoPath) => {
+              const meta = await getVideoMeta(videoPath);
+              const thumbPath = await createVideoThumbnail(videoPath);
+              const opts = { caption, parse_mode: 'HTML', supports_streaming: true };
+              if (meta.duration) opts.duration = meta.duration;
+              if (meta.width) opts.width = meta.width;
+              if (meta.height) opts.height = meta.height;
+              if (thumbPath) opts.thumb = thumbPath;
+              try {
+                log('send:video', videoPath, meta);
+                await bot.sendVideo(msg.chat.id, videoPath, opts);
+                return true;
+              } catch (e) {
+                log('send:video:error', e?.message || String(e));
+                const telethonOk = await new Promise((resolve) => {
+                  const proc = spawn('python3', [
+                    '/app/telethon_send.py',
+                    String(msg.chat.id),
+                    videoPath,
+                    caption,
+                    String(meta.duration || ''),
+                    String(thumbPath || ''),
+                  ], { env: process.env });
+                  let perr = '';
+                  proc.stderr.on('data', (d) => (perr += d.toString()));
+                  proc.on('error', () => resolve(false));
+                  proc.on('close', (code) => {
+                    if (code !== 0) log('telethon:error', perr.slice(-800));
+                    resolve(code === 0);
+                  });
+                });
+                return telethonOk;
+              } finally {
+                if (thumbPath) { try { fs.unlinkSync(thumbPath); } catch {} }
+              }
+            };
+
+            let ok = false;
+            let converted = await transcodeToTelegramMp4(f);
+            if (!converted) converted = await remuxToMp4(f);
+            if (converted && fs.existsSync(converted)) {
+              ok = await sendAsVideo(converted);
+              try { fs.unlinkSync(converted); } catch {}
+            }
+
+            if (ok) sent++;
+            else await bot.sendMessage(msg.chat.id, `⏭️ تعذر إرساله كوسائط حتى بعد التحويل: ${path.basename(f)}`);
+          } else {
+            await bot.sendMessage(msg.chat.id, `⏭️ تخطيته لأنه ليس صورة/فيديو: ${path.basename(f)}`);
+          }
+        }
+
+        try { fs.unlinkSync(f); } catch {}
       }
-      // count only successful media sends by checking if skip message wasn't triggered
-      // (simplified): increment only when a media API was called successfully in this loop
-      // here we increment conservatively by probing current sent value changes in branches
-      sent++;
+
+      if (groupName !== '__root__') {
+        try { fs.rmSync(path.join(jobDir, groupName), { recursive: true, force: true }); } catch {}
+      }
     }
 
     await bot.sendMessage(msg.chat.id, `✅ تم إرسال ${sent} وسائط.`);
