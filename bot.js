@@ -541,6 +541,21 @@ async function sendMediaFile(chatId, filePath, caption, mode = 's', inlineKeyboa
     log('send:video:error', emsg);
 
     if (/413|Request Entity Too Large/i.test(emsg)) {
+      // Original mode: preserve quality, try sending as document before any compression
+      if (mode === 'oq') {
+        try {
+          const sentDoc = await bot.sendDocument(chatId, source, {
+            caption: caption + '\n\n📦 original file',
+            parse_mode: 'HTML',
+            reply_markup: inlineKeyboard ? { inline_keyboard: inlineKeyboard } : undefined,
+          });
+          return { ok: true, kind: 'video', messageId: sentDoc?.message_id };
+        } catch (eDoc) {
+          log('send:document:original:error', eDoc?.message || String(eDoc));
+          return { ok: false, kind: 'video' };
+        }
+      }
+
       const smaller = await compressToUnderLimit(source, 45);
       if (smaller) {
         const m2 = await getVideoMeta(smaller);
