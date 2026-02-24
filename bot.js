@@ -125,7 +125,7 @@ async function transcodeToTelegramMp4(inputPath) {
     const p = spawn('ffmpeg', [
       '-y',
       '-i', inputPath,
-      '-vf', 'scale=trunc(iw*min(960/iw\\,960/ih)/2)*2:trunc(ih*min(960/iw\\,960/ih)/2)*2,fps=30',
+      '-vf', 'scale=960:-2,fps=30',
       '-c:v', 'libx264',
       '-profile:v', 'baseline',
       '-level', '3.1',
@@ -172,7 +172,7 @@ async function compressToUnderLimit(inputPath, targetMB = 48) {
     log('ffmpeg:small:start', inputPath, '->', outputPath, 'targetMB=', targetMB);
     const p = spawn('ffmpeg', [
       '-y', '-i', inputPath,
-      '-vf', 'scale=trunc(iw*min(720/iw\\,720/ih)/2)*2:trunc(ih*min(720/iw\\,720/ih)/2)*2,fps=24',
+      '-vf', 'scale=720:-2,fps=24',
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '34', '-maxrate', `${Math.floor(targetBits/1000)}k`, '-bufsize', `${Math.floor(targetBits/500)}k`,
       '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
       '-c:a', 'aac', '-b:a', '64k', '-ac', '1',
