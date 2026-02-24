@@ -111,15 +111,19 @@ bot.on('message', async (msg) => {
 
     // 3) yt-dlp fallback for unsupported links
     if (result.code !== 0) {
+      await bot.sendMessage(msg.chat.id, '↪️ gallery-dl فشل، جاري المحاولة بـ yt-dlp...');
       const ytdlpOut = path.join(jobDir, '%(title).80s [%(id)s].%(ext)s');
       const ytdlpArgs = ['--no-playlist', '-o', ytdlpOut, url];
       const ytdlpResult = await runCommand('yt-dlp', ytdlpArgs);
-      if (ytdlpResult.code === 127) {
+
+      if (ytdlpResult.code === 0) {
+        result = { code: 0, err: '', tool: 'yt-dlp' };
+      } else if (ytdlpResult.code === 127) {
         // python module fallback
         const ytdlpPy = await runCommand('python3', ['-m', 'yt_dlp', ...ytdlpArgs]);
-        if (ytdlpPy.code === 0) result = { code: 0, err: '', tool: 'yt-dlp' };
-      } else if (ytdlpResult.code === 0) {
-        result = { code: 0, err: '', tool: 'yt-dlp' };
+        result = ytdlpPy.code === 0 ? { code: 0, err: '', tool: 'yt-dlp' } : { ...ytdlpPy, tool: 'yt-dlp(py)' };
+      } else {
+        result = { ...ytdlpResult, tool: 'yt-dlp' };
       }
     }
 
@@ -148,7 +152,7 @@ bot.on('message', async (msg) => {
         }
       }
 
-      await bot.sendMessage(msg.chat.id, `❌ فشل التحميل\n${errText}`);
+      await bot.sendMessage(msg.chat.id, `❌ فشل التحميل (${result.tool || 'unknown'})\n${errText}`);
       fs.rmSync(jobDir, { recursive: true, force: true });
       return;
     }
