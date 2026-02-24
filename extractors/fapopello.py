@@ -15,7 +15,7 @@ class FapopelloExtractor(Extractor):
     def items(self):
         url = self.url
         user = self.groups[0]
-        metadata = self.metadata(user)
+        base_meta = {"user": user}
 
         while url:
             self.log.info("Fetching gallery page: %s", url)
@@ -26,8 +26,7 @@ class FapopelloExtractor(Extractor):
 
             for path, post_id in post_links:
                 post_url = "https://fapopello.com" + path
-                # Skip Message.Directory to avoid tuple-shape mismatch on some gallery-dl versions
-                yield from self._extract_post_media(post_url, user, post_id, metadata)
+                yield from self._extract_post_media(post_url, user, post_id, base_meta)
 
             # Pagination
             next_match = re.search(r'class="next" href="([^"]+)"', page_data)
@@ -36,10 +35,7 @@ class FapopelloExtractor(Extractor):
             else:
                 url = None
 
-    def metadata(self, user=None):
-        return {"user": user or self.groups[0]}
-
-    def _extract_post_media(self, post_url, user, post_id, metadata):
+    def _extract_post_media(self, post_url, user, post_id, base_meta):
         post_data = self.request(post_url).text
         body_match = re.search(r'<div class="post-body">(.*?)</div>', post_data, re.DOTALL)
         if not body_match:
@@ -64,6 +60,6 @@ class FapopelloExtractor(Extractor):
                 "extension": extension,
                 "filename": os.path.basename(filename),
             }
-            if isinstance(metadata, dict):
-                data.update(metadata)
+            if isinstance(base_meta, dict):
+                data.update(base_meta)
             yield Message.Url, media_url, data
