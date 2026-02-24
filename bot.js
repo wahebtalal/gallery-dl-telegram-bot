@@ -165,6 +165,30 @@ async function remuxToMp4(inputPath) {
   });
 }
 
+async function compressToUnderLimit(inputPath, targetMB = 48) {
+  const outputPath = inputPath.replace(/\.[^/.]+$/, '') + `.small.mp4`;
+  const targetBits = Math.max(600_000, Math.floor((targetMB * 1024 * 1024 * 8) / 60));
+  return await new Promise((resolve) => {
+    log('ffmpeg:small:start', inputPath, '->', outputPath, 'targetMB=', targetMB);
+    const p = spawn('ffmpeg', [
+      '-y', '-i', inputPath,
+      '-vf', 'scale=trunc(iw*min(720/iw\,720/ih)/2)*2:trunc(ih*min(720/iw\,720/ih)/2)*2,fps=24',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '34', '-maxrate', `${Math.floor(targetBits/1000)}k`, '-bufsize', `${Math.floor(targetBits/500)}k`,
+      '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+      '-c:a', 'aac', '-b:a', '64k', '-ac', '1',
+      outputPath,
+    ]);
+    let err = '';
+    p.stderr.on('data', (d) => (err += d.toString()));
+    p.on('error', () => resolve(null));
+    p.on('close', (code) => {
+      log('ffmpeg:small:close', code);
+      if (code !== 0) log('ffmpeg:small:error', err.slice(-1200));
+      resolve(code === 0 ? outputPath : null);
+    });
+  });
+}
+
 async function getVideoMeta(filePath) {
   return await new Promise((resolve) => {
     const p = spawn('ffprobe', [
@@ -376,12 +400,12 @@ bot.on('message', async (msg) => {
       await bot.sendMessage(msg.chat.id, `📦 batch: ${groupName} (${groupFiles.length})`);
       for (const f of groupFiles.slice(0, 30)) {
         const size = fs.statSync(f).size / (1024 * 1024);
-        if (size > 49) {
-          await bot.sendMessage(msg.chat.id, `⚠️ تخطيت ملف كبير: ${path.basename(f)} (${size.toFixed(1)}MB)`);
+        const ext = path.extname(f).toLowerCase();
+
+        if (size > 49 && ['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
+          await bot.sendMessage(msg.chat.id, `⚠️ تخطيت صورة كبيرة: ${path.basename(f)} (${size.toFixed(1)}MB)`);
           continue;
         }
-
-        const ext = path.extname(f).toLowerCase();
         const caption = buildCaption({
           title: meta.title,
           href: meta.href,
@@ -441,12 +465,21 @@ bot.on('message', async (msg) => {
             let converted = await transcodeToTelegramMp4(f);
             if (!converted) converted = await remuxToMp4(f);
             if (converted && fs.existsSync(converted)) {
-              ok = await sendAsVideo(converted);
-              try { fs.unlinkSync(converted); } catch {}
+              let candidate = converted;
+              const cSize = fs.statSync(candidate).size / (1024 * 1024);
+              if (cSize > 49) {
+                const smaller = await compressToUnderLimit(candidate, 48);
+                if (smaller && fs.existsSync(smaller)) {
+                  try { fs.unlinkSync(candidate); } catch {}
+                  candidate = smaller;
+                }
+              }
+              ok = await sendAsVideo(candidate);
+              try { fs.unlinkSync(candidate); } catch {}
             }
 
             if (ok) sent++;
-            else await bot.sendMessage(msg.chat.id, `⏭️ تعذر إرساله كوسائط حتى بعد التحويل: ${path.basename(f)}`);
+            else await bot.sendMessage(msg.chat.id, `⏭️ تعذر إرساله كوسائط حتى بعد التحويل/الضغط: ${path.basename(f)}`);
           } else {
             await bot.sendMessage(msg.chat.id, `⏭️ تخطيته لأنه ليس صورة/فيديو: ${path.basename(f)}`);
           }
