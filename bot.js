@@ -793,7 +793,7 @@ bot.on('callback_query', async (q) => {
         if (ok) sent++;
       }
 
-      await bot.sendMessage(chatId, `✅ done. sent=${sent} (files kept for more actions)`);
+      await bot.sendMessage(chatId, `✅ done. sent=${sent}`);
       return;
     }
 
