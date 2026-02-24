@@ -109,11 +109,14 @@ async function isVideoByProbe(filePath) {
 async function transcodeToTelegramMp4(inputPath) {
   const outputPath = inputPath.replace(/\.[^/.]+$/, '') + '.tg.mp4';
   return await new Promise((resolve) => {
+    log('ffmpeg:start', inputPath, '->', outputPath);
     const p = spawn('ffmpeg', [
       '-y',
       '-i', inputPath,
       '-vf', 'scale=trunc(iw*min(960/iw\,960/ih)/2)*2:trunc(ih*min(960/iw\,960/ih)/2)*2,fps=30',
       '-c:v', 'libx264',
+      '-profile:v', 'baseline',
+      '-level', '3.1',
       '-preset', 'veryfast',
       '-crf', '30',
       '-pix_fmt', 'yuv420p',
@@ -124,7 +127,10 @@ async function transcodeToTelegramMp4(inputPath) {
       outputPath,
     ]);
     p.on('error', () => resolve(null));
-    p.on('close', (code) => resolve(code === 0 ? outputPath : null));
+    p.on('close', (code) => {
+      log('ffmpeg:close', code);
+      resolve(code === 0 ? outputPath : null);
+    });
   });
 }
 
@@ -338,9 +344,11 @@ bot.on('message', async (msg) => {
       const videoExts = ['.mp4', '.m4v', '.mov', '.mkv', '.webm', '.avi', '.mpeg', '.mpg', '.m4s', '.ts'];
 
       if (imageExts.includes(ext)) {
+        log('send:photo', f);
         await bot.sendPhoto(msg.chat.id, f, { caption, parse_mode: 'HTML' });
       } else {
         const looksVideo = videoExts.includes(ext) || await isVideoByProbe(f);
+        log('send:classify', { file: f, ext, looksVideo });
         if (looksVideo) {
           const sendAsVideo = async (videoPath) => {
             const meta = await getVideoMeta(videoPath);
@@ -351,37 +359,23 @@ bot.on('message', async (msg) => {
             if (meta.height) opts.height = meta.height;
             if (thumbPath) opts.thumb = thumbPath;
             try {
+              log('send:video', videoPath, meta);
               await bot.sendVideo(msg.chat.id, videoPath, opts);
               return true;
-            } catch {
-              // Telethon fallback (user session) to force media send
-              const telethonOk = await new Promise((resolve) => {
-                const proc = spawn('python3', [
-                  '/app/telethon_send.py',
-                  String(msg.chat.id),
-                  videoPath,
-                  caption,
-                  String(meta.duration || ''),
-                  String(thumbPath || ''),
-                ], { env: process.env });
-                proc.on('error', () => resolve(false));
-                proc.on('close', (code) => resolve(code === 0));
-              });
-              return telethonOk;
+            } catch (e) {
+              log('send:video:error', e?.message || String(e));
+              return false;
             } finally {
               if (thumbPath) { try { fs.unlinkSync(thumbPath); } catch {} }
             }
           };
 
-          // Like video-encode flow: encode to Telegram-friendly mp4 first, then send as media
+          // Always encode first to Telegram-friendly mp4, never send as document
           let ok = false;
           const converted = await transcodeToTelegramMp4(f);
           if (converted && fs.existsSync(converted)) {
             ok = await sendAsVideo(converted);
             try { fs.unlinkSync(converted); } catch {}
-          }
-          if (!ok) {
-            ok = await sendAsVideo(f);
           }
 
           if (!ok) {
