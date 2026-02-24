@@ -124,21 +124,32 @@ async function transcodeToTelegramMp4(inputPath) {
   });
 }
 
-async function getVideoDurationSeconds(filePath) {
+async function getVideoMeta(filePath) {
   return await new Promise((resolve) => {
     const p = spawn('ffprobe', [
       '-v', 'error',
-      '-show_entries', 'format=duration',
-      '-of', 'default=noprint_wrappers=1:nokey=1',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height:format=duration',
+      '-of', 'json',
       filePath,
     ]);
     let out = '';
     p.stdout.on('data', (d) => (out += d.toString()));
-    p.on('error', () => resolve(undefined));
+    p.on('error', () => resolve({}));
     p.on('close', (code) => {
-      if (code !== 0) return resolve(undefined);
-      const n = Math.round(parseFloat(out.trim()));
-      resolve(Number.isFinite(n) && n > 0 ? n : undefined);
+      if (code !== 0) return resolve({});
+      try {
+        const j = JSON.parse(out || '{}');
+        const s = (j.streams && j.streams[0]) || {};
+        const duration = Math.round(parseFloat((j.format || {}).duration || '0'));
+        resolve({
+          duration: Number.isFinite(duration) && duration > 0 ? duration : undefined,
+          width: s.width || undefined,
+          height: s.height || undefined,
+        });
+      } catch {
+        resolve({});
+      }
     });
   });
 }
@@ -305,10 +316,12 @@ bot.on('message', async (msg) => {
         const looksVideo = videoExts.includes(ext) || await isVideoByProbe(f);
         if (looksVideo) {
           const sendAsVideo = async (videoPath) => {
-            const duration = await getVideoDurationSeconds(videoPath);
+            const meta = await getVideoMeta(videoPath);
             const thumbPath = await createVideoThumbnail(videoPath);
             const opts = { caption, parse_mode: 'HTML', supports_streaming: true };
-            if (duration) opts.duration = duration;
+            if (meta.duration) opts.duration = meta.duration;
+            if (meta.width) opts.width = meta.width;
+            if (meta.height) opts.height = meta.height;
             if (thumbPath) opts.thumb = thumbPath;
             try {
               await bot.sendVideo(msg.chat.id, videoPath, opts);
@@ -321,7 +334,7 @@ bot.on('message', async (msg) => {
                   String(msg.chat.id),
                   videoPath,
                   caption,
-                  String(duration || ''),
+                  String(meta.duration || ''),
                   String(thumbPath || ''),
                 ], { env: process.env });
                 proc.on('error', () => resolve(false));
@@ -333,13 +346,15 @@ bot.on('message', async (msg) => {
             }
           };
 
-          let ok = await sendAsVideo(f);
+          // Like video-encode flow: encode to Telegram-friendly mp4 first, then send as media
+          let ok = false;
+          const converted = await transcodeToTelegramMp4(f);
+          if (converted && fs.existsSync(converted)) {
+            ok = await sendAsVideo(converted);
+            try { fs.unlinkSync(converted); } catch {}
+          }
           if (!ok) {
-            const converted = await transcodeToTelegramMp4(f);
-            if (converted && fs.existsSync(converted)) {
-              ok = await sendAsVideo(converted);
-              try { fs.unlinkSync(converted); } catch {}
-            }
+            ok = await sendAsVideo(f);
           }
 
           if (!ok) {
