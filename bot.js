@@ -318,6 +318,72 @@ async function scrapeMediaLinks(url) {
   return extractMediaLinks(html);
 }
 
+async function runCommandLogged(bin, commandArgs = [], timeoutMs = 180000) {
+  return await new Promise((resolve) => {
+    log('cmd:start', bin, commandArgs.join(' '));
+    const proc = spawn(bin, commandArgs, { env: process.env });
+    let err = '';
+    let out = '';
+    const timer = setTimeout(() => {
+      try { proc.kill('SIGKILL'); } catch {}
+      log('cmd:timeout', bin, timeoutMs);
+      resolve({ code: 124, err: `timeout after ${timeoutMs}ms`, out, tool: bin });
+    }, timeoutMs);
+    proc.stderr.on('data', (d) => { err += d.toString(); });
+    proc.stdout.on('data', (d) => { out += d.toString(); });
+    proc.on('error', (e) => {
+      clearTimeout(timer);
+      log('cmd:error', bin, String(e?.message || e));
+      resolve({ code: 127, err: String(e?.message || e), out, tool: bin });
+    });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      log('cmd:close', bin, 'code=', code);
+      resolve({ code, err, out, tool: bin });
+    });
+  });
+}
+
+async function downloadToJob(url, jobDir) {
+  const args = [
+    '-D', jobDir,
+    '--write-metadata',
+    '--no-mtime',
+    '-X', '/app/extractors',
+    '-o', 'extractor.module-sources=/app/extractors',
+  ];
+  if (API_ID) args.push('-o', `extractor.telegram.api-id=${API_ID}`);
+  if (API_HASH) args.push('-o', `extractor.telegram.api-hash=${API_HASH}`);
+  if (STRING_SESSION) args.push('-o', `extractor.telegram.session=${STRING_SESSION}`);
+  args.push(url);
+
+  let result = await runCommandLogged('gallery-dl', args);
+  log('gallery-dl:result', result.code);
+  if (result.code !== 0) log('gallery-dl:stderr', (result.err || '').slice(-1200));
+
+  if (result.code === 127) {
+    result = await runCommandLogged('python3', ['-m', 'gallery_dl', ...args]);
+    log('gallery-dl(py):result', result.code);
+  }
+
+  const partialFiles = walk(jobDir).filter((f) => !f.endsWith('.json'));
+  if (result.code === 124 && partialFiles.length > 0) {
+    result = { code: 0, err: '', tool: 'gallery-dl(partial)' };
+  }
+
+  if (result.code !== 0) {
+    const ytdlpOut = path.join(jobDir, '%(title).80s [%(id)s].%(ext)s');
+    const ytdlpArgs = ['--no-playlist', '-o', ytdlpOut, url];
+    const ytdlpResult = await runCommandLogged('yt-dlp', ytdlpArgs);
+    log('yt-dlp:result', ytdlpResult.code);
+    if (ytdlpResult.code === 0) result = { code: 0, err: '', tool: 'yt-dlp' };
+    else result = ytdlpResult;
+  }
+
+  const files = walk(jobDir).filter((f) => !f.endsWith('.json'));
+  return { result, files };
+}
+
 async function telethonSendVideo(chatId, videoPath, caption, duration, thumbPath) {
   return await new Promise((resolve) => {
     const pyBin = fs.existsSync('/opt/py/bin/python') ? '/opt/py/bin/python' : 'python3';
@@ -424,12 +490,20 @@ bot.on('message', async (msg) => {
     const url = msg.text.trim();
     if (!isUrl(url)) return bot.sendMessage(msg.chat.id, 'ارسل رابط صحيح.');
 
-    await bot.sendMessage(msg.chat.id, '⏳ جاري التحميل...');
-    log('job:start', { chat: msg.chat.id, from: msg.from?.id, url });
-
-    const jobDir = path.join(DOWNLOAD_DIR, `job-${Date.now()}-${Math.random().toString(36).slice(2,8)}`);
-    fs.mkdirSync(jobDir, { recursive: true });
-    log('job:dir', jobDir);
+    const preJobId = Math.random().toString(36).slice(2, 10);
+    JOBS.set(preJobId, { pending: true, url, chatId: msg.chat.id, createdAt: Date.now() });
+    await bot.sendMessage(msg.chat.id, '⚡ اختر الإجراء أولاً (قبل التحميل):', {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '📤 Original', callback_data: `pre:${preJobId}:oq` }, { text: '🎬 HD', callback_data: `pre:${preJobId}:hd` }, { text: '📱 SD', callback_data: `pre:${preJobId}:sd` }],
+          [{ text: '🗜 Compress', callback_data: `pre:${preJobId}:c` }, { text: '✨ Lossless', callback_data: `pre:${preJobId}:lq` }],
+          [{ text: '🖼 Screenshots', callback_data: `pre:${preJobId}:h` }, { text: '✂️ Trim 30s', callback_data: `pre:${preJobId}:t` }],
+          [{ text: '📚 Index Groups/Posts', callback_data: `pre:${preJobId}:idx` }],
+        ],
+      },
+    });
+    log('pre:menu', { jobId: preJobId, chat: msg.chat.id, url });
+    return;
 
     const args = [
       '-D', jobDir,
@@ -575,6 +649,58 @@ bot.on('callback_query', async (q) => {
 
     const parts = data.split(':');
     const type = parts[0];
+
+    if (type === 'pre') {
+      const [, preJobId, mode] = parts;
+      const pending = JOBS.get(preJobId);
+      if (!pending?.pending) return bot.answerCallbackQuery(q.id, { text: 'job expired' });
+
+      await bot.answerCallbackQuery(q.id, { text: 'starting download...' });
+      await bot.sendMessage(chatId, '⏳ جاري التحميل حسب الخيار...');
+
+      const jobDir = path.join(DOWNLOAD_DIR, `job-${Date.now()}-${Math.random().toString(36).slice(2,8)}`);
+      fs.mkdirSync(jobDir, { recursive: true });
+      log('job:start', { chat: chatId, from: q.from?.id, url: pending.url, mode });
+      log('job:dir', jobDir);
+
+      const { result, files } = await downloadToJob(pending.url, jobDir);
+      if (result.code !== 0) {
+        await bot.sendMessage(chatId, `❌ فشل التحميل (${result.tool || 'unknown'})\n${(result.err || '').slice(-1000)}`);
+        try { fs.rmSync(jobDir, { recursive: true, force: true }); } catch {}
+        JOBS.delete(preJobId);
+        return;
+      }
+
+      if (!files.length) {
+        await bot.sendMessage(chatId, 'تم التحميل لكن لا توجد ملفات.');
+        try { fs.rmSync(jobDir, { recursive: true, force: true }); } catch {}
+        JOBS.delete(preJobId);
+        return;
+      }
+
+      if (mode === 'idx') {
+        const idxJobId = Math.random().toString(36).slice(2, 8);
+        const index = buildIndex(idxJobId, jobDir, files);
+        const meta = findMetadata(jobDir);
+        index.meta = meta;
+        index.url = pending.url;
+        const rows = index.groups.map((g, i) => ([{ text: `📁 ${g.groupName} (${g.files.length})`, callback_data: `jg:${idxJobId}:${i}` }]));
+        await bot.sendMessage(chatId, `✅ Indexed ${files.length} items. اختر مجموعة:`, { reply_markup: { inline_keyboard: rows } });
+      } else {
+        const meta = findMetadata(jobDir);
+        let sent = 0;
+        for (const f of files.slice(0, 80)) {
+          const cap = buildCaption({ title: meta.title, href: meta.href, fallbackUrl: pending.url, fileName: path.basename(f) });
+          const ok = await sendMediaFile(chatId, f, cap, mode);
+          if (ok) sent++;
+          try { fs.unlinkSync(f); } catch {}
+        }
+        await bot.sendMessage(chatId, `✅ done. sent=${sent}`);
+        try { fs.rmSync(jobDir, { recursive: true, force: true }); } catch {}
+      }
+      JOBS.delete(preJobId);
+      return;
+    }
 
     if (type === 'jg') {
       const [, jobId, gIdxRaw] = parts;
