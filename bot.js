@@ -94,7 +94,8 @@ function actionRows(jobId, gIdx, pIdx = null) {
       { text: '🖼 Screenshots', callback_data: `${target}h` },
       { text: '✂️ Trim 30s', callback_data: `${target}t` },
     ],
-  ];
+    pIdx === null ? [{ text: '🧹 Cleanup group files', callback_data: `clg:${jobId}:${gIdx}` }] : [],
+  ].filter(r => r.length);
 }
 
 function extractMediaLinks(html) {
@@ -342,6 +343,24 @@ async function runCommandLogged(bin, commandArgs = [], timeoutMs = 180000) {
       resolve({ code, err, out, tool: bin });
     });
   });
+}
+
+async function extractUrlsToFile(url, jobDir) {
+  const args = [
+    '--simulate', '--get-url',
+    '-X', '/app/extractors',
+    '-o', 'extractor.module-sources=/app/extractors',
+  ];
+  if (API_ID) args.push('-o', `extractor.telegram.api-id=${API_ID}`);
+  if (API_HASH) args.push('-o', `extractor.telegram.api-hash=${API_HASH}`);
+  if (STRING_SESSION) args.push('-o', `extractor.telegram.session=${STRING_SESSION}`);
+  args.push(url);
+  const r = await runCommandLogged('gallery-dl', args, 120000);
+  const lines = (r.out || '').split('\n').map(s => s.trim()).filter(s => /^https?:\/\//i.test(s));
+  const outPath = path.join(jobDir, 'urls.txt');
+  try { fs.writeFileSync(outPath, lines.join('\n') + '\n', 'utf8'); } catch {}
+  log('urls:extracted', lines.length, outPath);
+  return { code: r.code, urls: lines, path: outPath, err: r.err || '' };
 }
 
 async function downloadToJob(url, jobDir) {
@@ -663,6 +682,11 @@ bot.on('callback_query', async (q) => {
       log('job:start', { chat: chatId, from: q.from?.id, url: pending.url, mode });
       log('job:dir', jobDir);
 
+      const urlList = await extractUrlsToFile(pending.url, jobDir);
+      if (urlList.urls?.length) {
+        await bot.sendMessage(chatId, `🔗 Extracted URLs: ${urlList.urls.length}\nSaved: urls.txt`);
+      }
+
       const { result, files } = await downloadToJob(pending.url, jobDir);
       if (result.code !== 0) {
         await bot.sendMessage(chatId, `❌ فشل التحميل (${result.tool || 'unknown'})\n${(result.err || '').slice(-1000)}`);
@@ -684,7 +708,7 @@ bot.on('callback_query', async (q) => {
         const meta = findMetadata(jobDir);
         index.meta = meta;
         index.url = pending.url;
-        const rows = index.groups.map((g, i) => ([{ text: `📁 ${g.groupName} (${g.files.length})`, callback_data: `jg:${idxJobId}:${i}` }]));
+        const rows = index.groups.map((g, i) => ([{ text: `📁 ${g.groupName} (${g.files.length})`, callback_data: `jg:${idxJobId}:${i}:0` }]));
         await bot.sendMessage(chatId, `✅ Indexed ${files.length} items. اختر مجموعة:`, { reply_markup: { inline_keyboard: rows } });
       } else {
         const meta = findMetadata(jobDir);
@@ -703,14 +727,22 @@ bot.on('callback_query', async (q) => {
     }
 
     if (type === 'jg') {
-      const [, jobId, gIdxRaw] = parts;
+      const [, jobId, gIdxRaw, pageRaw] = parts;
       const gIdx = Number(gIdxRaw);
+      const page = Number(pageRaw || 0);
       const job = JOBS.get(jobId);
       if (!job || !job.groups[gIdx]) return bot.answerCallbackQuery(q.id, { text: 'job expired' });
       const g = job.groups[gIdx];
-      const postRows = g.posts.slice(0, 20).map((p, pIdx) => ([{ text: `🧩 Post ${p.postId} (${p.items.length})`, callback_data: `jp:${jobId}:${gIdx}:${pIdx}` }]));
-      const rows = [...postRows, ...actionRows(jobId, gIdx)];
-      await bot.editMessageText(`📁 ${g.groupName}\nPosts: ${g.posts.length}\nFiles: ${g.files.length}`, {
+      const pageSize = 8;
+      const start = page * pageSize;
+      const end = start + pageSize;
+      const pagePosts = g.posts.slice(start, end);
+      const postRows = pagePosts.map((p, i) => ([{ text: `🧩 Post ${p.postId} (${p.items.length})`, callback_data: `jp:${jobId}:${gIdx}:${start + i}:${page}` }]));
+      const nav = [];
+      if (page > 0) nav.push({ text: '⬅️ Prev', callback_data: `jg:${jobId}:${gIdx}:${page - 1}` });
+      if (end < g.posts.length) nav.push({ text: 'Next ➡️', callback_data: `jg:${jobId}:${gIdx}:${page + 1}` });
+      const rows = [...postRows, ...(nav.length ? [nav] : []), ...actionRows(jobId, gIdx)];
+      await bot.editMessageText(`📁 ${g.groupName}\nPosts: ${g.posts.length}\nFiles: ${g.files.length}\nPage: ${page + 1}`, {
         chat_id: chatId,
         message_id: q.message.message_id,
         reply_markup: { inline_keyboard: rows },
@@ -719,12 +751,13 @@ bot.on('callback_query', async (q) => {
     }
 
     if (type === 'jp') {
-      const [, jobId, gIdxRaw, pIdxRaw] = parts;
+      const [, jobId, gIdxRaw, pIdxRaw, pageRaw] = parts;
       const gIdx = Number(gIdxRaw), pIdx = Number(pIdxRaw);
+      const page = Number(pageRaw || 0);
       const job = JOBS.get(jobId);
       const post = job?.groups?.[gIdx]?.posts?.[pIdx];
       if (!post) return bot.answerCallbackQuery(q.id, { text: 'post not found' });
-      const rows = actionRows(jobId, gIdx, pIdx);
+      const rows = [...actionRows(jobId, gIdx, pIdx), [{ text: '↩️ Back to group', callback_data: `jg:${jobId}:${gIdx}:${page}` }]];
       await bot.editMessageText(`🧩 Post ${post.postId}\nItems: ${post.items.length}`, {
         chat_id: chatId,
         message_id: q.message.message_id,
@@ -759,20 +792,24 @@ bot.on('callback_query', async (q) => {
         });
         const ok = await sendMediaFile(chatId, f, cap, mode);
         if (ok) sent++;
-        try { fs.unlinkSync(f); } catch {}
       }
 
-      await bot.sendMessage(chatId, `✅ done. sent=${sent}`);
+      await bot.sendMessage(chatId, `✅ done. sent=${sent} (files kept for more actions)`);
+      return;
+    }
 
-      // cleanup empty folders/job
-      try {
-        const remain = walk(job.jobDir).filter((f) => !f.endsWith('.json'));
-        if (!remain.length) {
-          fs.rmSync(job.jobDir, { recursive: true, force: true });
-          JOBS.delete(jobId);
-          await bot.sendMessage(chatId, '🧹 cleaned job folder');
-        }
-      } catch {}
+    if (type === 'clg') {
+      const [, jobId, gIdxRaw] = parts;
+      const gIdx = Number(gIdxRaw);
+      const job = JOBS.get(jobId);
+      const g = job?.groups?.[gIdx];
+      if (!g) return bot.answerCallbackQuery(q.id, { text: 'group not found' });
+      for (const f of g.files) {
+        try { fs.unlinkSync(f); } catch {}
+      }
+      try { if (g.groupName !== '__root__') fs.rmSync(path.join(job.jobDir, g.groupName), { recursive: true, force: true }); } catch {}
+      await bot.answerCallbackQuery(q.id, { text: 'group cleaned' });
+      await bot.sendMessage(chatId, `🧹 cleaned group ${g.groupName}`);
       return;
     }
   } catch (e) {
