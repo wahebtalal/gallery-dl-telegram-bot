@@ -439,7 +439,8 @@ bot.on('message', async (msg) => {
               } catch (e) {
                 log('send:video:error', e?.message || String(e));
                 const telethonOk = await new Promise((resolve) => {
-                  const proc = spawn('python3', [
+                  const pyBin = fs.existsSync('/opt/py/bin/python') ? '/opt/py/bin/python' : 'python3';
+                  const proc = spawn(pyBin, [
                     '/app/telethon_send.py',
                     String(msg.chat.id),
                     videoPath,
@@ -448,10 +449,18 @@ bot.on('message', async (msg) => {
                     String(thumbPath || ''),
                   ], { env: process.env });
                   let perr = '';
+                  let pout = '';
                   proc.stderr.on('data', (d) => (perr += d.toString()));
-                  proc.on('error', () => resolve(false));
+                  proc.stdout.on('data', (d) => (pout += d.toString()));
+                  proc.on('error', (e) => {
+                    log('telethon:spawn:error', e?.message || String(e));
+                    resolve(false);
+                  });
                   proc.on('close', (code) => {
-                    if (code !== 0) log('telethon:error', perr.slice(-800));
+                    if (code !== 0) {
+                      log('telethon:error', perr.slice(-1000));
+                      log('telethon:out', pout.slice(-500));
+                    }
                     resolve(code === 0);
                   });
                 });
