@@ -52,6 +52,40 @@ function extractMediaLinks(html) {
   return out;
 }
 
+function escapeHtml(s = '') {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function findMetadata(jobDir) {
+  try {
+    const jsonFiles = walk(jobDir).filter((f) => f.endsWith('.json'));
+    for (const jf of jsonFiles) {
+      try {
+        const raw = fs.readFileSync(jf, 'utf8');
+        const data = JSON.parse(raw);
+        const title = data.title || data.filename || data.id || null;
+        const href = data.webpage_url || data.url || data.post_url || data.original_url || null;
+        if (title || href) return { title, href };
+      } catch {}
+    }
+  } catch {}
+  return { title: null, href: null };
+}
+
+function buildCaption({ title, href, fallbackUrl, fileName }) {
+  const t = title || fileName || 'وسائط محمّلة';
+  const link = href || fallbackUrl;
+  let caption = `🎬 <b>${escapeHtml(t)}</b>`;
+  if (link) caption += `\n🔗 <a href="${escapeHtml(link)}">source</a>`;
+  if (caption.length > 1000) caption = caption.slice(0, 980) + '...';
+  return caption;
+}
+
 async function scrapeMediaLinks(url) {
   const res = await fetch(url, {
     headers: {
@@ -136,14 +170,21 @@ bot.on('message', async (msg) => {
           if (links.length) {
             let sent = 0;
             for (const link of links.slice(0, 8)) {
+              const caption = buildCaption({ title: 'Media', href: link, fallbackUrl: url, fileName: null });
               try {
-                await bot.sendDocument(msg.chat.id, link);
+                if (/\.(mp4|webm|mkv|mov)(\?|$)/i.test(link)) {
+                  await bot.sendVideo(msg.chat.id, link, { caption, parse_mode: 'HTML' });
+                } else if (/\.(jpg|jpeg|png|webp|gif)(\?|$)/i.test(link)) {
+                  await bot.sendPhoto(msg.chat.id, link, { caption, parse_mode: 'HTML' });
+                } else {
+                  await bot.sendDocument(msg.chat.id, link, { caption, parse_mode: 'HTML' });
+                }
               } catch {
                 await bot.sendMessage(msg.chat.id, link);
               }
               sent++;
             }
-            await bot.sendMessage(msg.chat.id, `✅ تم عبر الوضع البديل. ارسلت ${sent} ملف/رابط.`);
+            await bot.sendMessage(msg.chat.id, `✅ تم عبر الوضع البديل. ارسلت ${sent} ملف/وسائط.`);
             fs.rmSync(jobDir, { recursive: true, force: true });
             return;
           }
@@ -164,6 +205,8 @@ bot.on('message', async (msg) => {
       return;
     }
 
+    const meta = findMetadata(jobDir);
+
     let sent = 0;
     for (const f of files.slice(0, 10)) {
       const size = fs.statSync(f).size / (1024 * 1024);
@@ -171,11 +214,26 @@ bot.on('message', async (msg) => {
         await bot.sendMessage(msg.chat.id, `⚠️ تخطيت ملف كبير: ${path.basename(f)} (${size.toFixed(1)}MB)`);
         continue;
       }
-      await bot.sendDocument(msg.chat.id, f, {}, { filename: path.basename(f) });
+
+      const ext = path.extname(f).toLowerCase();
+      const caption = buildCaption({
+        title: meta.title,
+        href: meta.href,
+        fallbackUrl: url,
+        fileName: path.basename(f),
+      });
+
+      if (['.mp4', '.mov', '.mkv', '.webm'].includes(ext)) {
+        await bot.sendVideo(msg.chat.id, f, { caption, parse_mode: 'HTML' });
+      } else if (['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
+        await bot.sendPhoto(msg.chat.id, f, { caption, parse_mode: 'HTML' });
+      } else {
+        await bot.sendDocument(msg.chat.id, f, { caption, parse_mode: 'HTML' }, { filename: path.basename(f) });
+      }
       sent++;
     }
 
-    await bot.sendMessage(msg.chat.id, `✅ تم إرسال ${sent} ملف/ملفات.`);
+    await bot.sendMessage(msg.chat.id, `✅ تم إرسال ${sent} ملف/وسائط.`);
     fs.rmSync(jobDir, { recursive: true, force: true });
   } catch (e) {
     await bot.sendMessage(msg.chat.id, `❌ خطأ: ${e.message}`);
