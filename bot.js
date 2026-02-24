@@ -39,7 +39,7 @@ function walk(dir, out = []) {
 
 function extractMediaLinks(html) {
   const normalized = String(html || '').replace(/\\\//g, '/');
-  const re = /https?:\/\/[^\s"'<>]+\.(?:mp4|webm|m3u8|jpg|jpeg|png|gif|webp)(?:\?[^\s"'<>]*)?/gi;
+  const re = /https?:\/\/[^\s"'<>]+\.(?:mp4|m4v|mov|mkv|webm|avi|m4s|ts|m3u8|jpg|jpeg|png|gif|webp)(?:\?[^\s"'<>]*)?/gi;
   const found = normalized.match(re) || [];
   const out = [];
   const seen = new Set();
@@ -172,7 +172,7 @@ bot.on('message', async (msg) => {
             for (const link of links.slice(0, 8)) {
               const caption = buildCaption({ title: 'Media', href: link, fallbackUrl: url, fileName: null });
               try {
-                if (/\.(mp4|webm|mkv|mov)(\?|$)/i.test(link)) {
+                if (/\.(mp4|m4v|mov|mkv|webm|avi|mpeg|mpg|m4s|ts)(\?|$)/i.test(link)) {
                   await bot.sendVideo(msg.chat.id, link, { caption, parse_mode: 'HTML' });
                 } else if (/\.(jpg|jpeg|png|webp|gif)(\?|$)/i.test(link)) {
                   await bot.sendPhoto(msg.chat.id, link, { caption, parse_mode: 'HTML' });
@@ -223,7 +223,7 @@ bot.on('message', async (msg) => {
         fileName: path.basename(f),
       });
 
-      if (['.mp4', '.mov', '.mkv', '.webm'].includes(ext)) {
+      if (['.mp4', '.m4v', '.mov', '.mkv', '.webm', '.avi', '.mpeg', '.mpg', '.m4s', '.ts'].includes(ext)) {
         await bot.sendVideo(msg.chat.id, f, { caption, parse_mode: 'HTML' });
       } else if (['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
         await bot.sendPhoto(msg.chat.id, f, { caption, parse_mode: 'HTML' });
